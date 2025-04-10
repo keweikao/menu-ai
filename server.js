@@ -1,3 +1,4 @@
+// 這是最終、乾淨的 server.js 內容，請用此檔案覆蓋 server.js
 require('dotenv').config();
 const axios = require('axios');
 const pg = require('pg');
@@ -7,7 +8,7 @@ const path = require('path');
 const vision = require('@google-cloud/vision');
 const { App: BoltApp, LogLevel } = require('@slack/bolt');
 const Papa = require('papaparse');
-const ExcelJS = require('exceljs'); // Import exceljs
+const ExcelJS = require('exceljs');
 
 // --- Basic Setup ---
 // dotenv is configured at the top
@@ -605,24 +606,3 @@ async function initializeDbSchema() {
     client.release();
   }
 }
-
-
-IMPORTANT: For any future changes to this file, use the final_file_content shown above as your reference. This content reflects the current state of the file, including any auto-formatting (e.g., if you used single quotes but the formatter converted them to double quotes). Always base your SEARCH/REPLACE operations on this final version to ensure accuracy.
-
-<environment_details>
-# VSCode Visible Files
-menu-ai-backend/server.js
-
-# VSCode Open Tabs
-menu-ai-backend/server.js
-menu-ai-backend/package.json
-menu-ai-backend/.gitignore
-
-# Current Time
-4/10/2025, 1:52:38 AM (Asia/Taipei, UTC+8:00)
-# Context Window Usage
-560,000 / 1,048.576K tokens used (53%)
-
-# Current Mode
-ACT MODE
-</environment_details>
