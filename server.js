@@ -256,8 +256,8 @@ boltApp.event('app_mention', async ({ event, client, say, logger }) => {
   if (event.files && event.files.length > 0) {
       const file = event.files[0];
       logger.info(`Mention included file: ${file.id} (${file.name})`);
-      // Updated questions based on the latest prompt's Critical Inputs
-      await say({ text: `收到菜單檔案 "${file.name}"！\n為了提供更精準的建議，請在這則訊息的討論串 (Thread) 中回覆以下資訊：\n\n-   **餐廳類型與風格**：(例如：台式早午餐、義式小館、日式拉麵...)\n-   **主要目標客群**：(例如：學生、上班族、家庭...)\n-   **(必填) 希望主打品項 (請提供 5-8 項)**：[請列出您想重點推廣的商品，這些將是菜單優化的 絕對核心]\n-   **(必填) 希望提昇銷量商品 (請提供 5-8 項)**：[請列出您想增加銷量的商品，這些是設計套餐、加購選項時的 重點考量]\n-   **(選填) 目前客單價範圍**：\n-   **(選填) 使用的點餐平台限制**：`, thread_ts: threadTs });
+      // Updated questions based on user feedback
+      await say({ text: `收到菜單檔案 "${file.name}"！\n為了提供更精準的建議，請在這則訊息的討論串 (Thread) 中回覆以下**必填資訊**：\n\n1.  **餐廳類型與風格**：(例如：台式早午餐、健康餐盒、義式小館等)\n2.  **主要目標客群**：(例如：學生、上班族、家庭、健身人士等)\n3.  **希望主打品項 (3-5 項)**：[請列出您想策略性運用、來自不同價格帶的主打商品。這些是提升客單價的重要槓桿。]\n4.  **目標客單價**：[請提供您希望達到的平均顧客訂單金額。]\n\n⚠️ 請提供**所有四項資訊**後，我才會進行優化建議。`, thread_ts: threadTs });
       processAndStoreFile(client, file.id, event.channel, threadTs, event.user).catch(error => {
           logger.error("Error in background file processing:", error);
       });
