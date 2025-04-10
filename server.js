@@ -416,10 +416,51 @@ ${menuContent}
                     await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: geminiResponseText });
                     console.log(`Posted initial analysis after receiving info to thread ${threadTs}`);
 
-                // --- State 2: Active Conversation or Excel Request ---
+                // --- State 2: Active Conversation, Summary Request, or Excel Request ---
                 } else if (status === 'active' || status === null) {
+                    // Check for "統整建議" command
+                    if (userMessageText.toLowerCase().includes('統整建議')) {
+                        logger.info(`Summary command detected for thread ${threadTs}`);
+                        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "收到統整指令，正在整理最新建議..." });
+
+                        // --- Start Summary Logic ---
+                        const summaryPromptText = `
+請根據以下所有對話紀錄與原始菜單內容，彙整一份最新版本的菜單優化建議報告。
+請**嚴格依照**我們一開始討論的 Markdown 格式與結構要求輸出，包含所有區塊 (主打推薦、套餐、分類、小點、飲品、加購、策略總結等)。
+請確保這是根據最新討論結果調整後的版本。**請勿在輸出中使用任何 emoji**。
+`;
+                        if (!menuId) throw new Error('Menu ID not found for this conversation.');
+                        const menuRes = await dbClient.query('SELECT filepath FROM menus WHERE id = $1', [menuId]);
+                        if (menuRes.rows.length === 0) throw new Error('Menu file record not found during summary.');
+
+                        const menuFilePath = menuRes.rows[0].filepath;
+                        let menuContent = '';
+                        try {
+                            const fileExt = path.extname(menuFilePath).toLowerCase();
+                            if (['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.pdf'].includes(fileExt)) {
+                                 menuContent = await performOcr(menuFilePath);
+                            } else {
+                                 const rawMenuContent = await fs.readFile(menuFilePath, 'utf-8');
+                                 menuContent = sanitizeStringForDB(rawMenuContent);
+                            }
+                        } catch (readError) { console.error(`Summary - Error getting menu content:`, readError); }
+
+                        const historyRes = await dbClient.query('SELECT sender, content FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC', [conversationId]);
+                        // Exclude the summary request itself from history sent to Gemini
+                        const geminiHistory = historyRes.rows.filter(row => !(row.sender === 'user' && row.content.toLowerCase().includes('統整建議')))
+                                                    .map(row => ({ role: row.sender === 'ai' ? 'model' : 'user', parts: [{ text: row.content }] }));
+
+                        const finalPromptForGemini = sanitizeStringForDB(`${summaryPromptText}\n\n原始菜單內容:\n${menuContent}`);
+                        const summaryResponseText = await callGemini(finalPromptForGemini, geminiHistory);
+
+                        // Post the summary back to the thread
+                        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: summaryResponseText });
+                        console.log(`Posted summary report to thread ${threadTs}`);
+                        // --- End Summary Logic ---
+                        return; // Stop processing after handling summary command
+                    }
                     // Check for "提供 excel" command (or csv for backward compatibility)
-                    if (userMessageText.toLowerCase().includes('提供 csv') || userMessageText.toLowerCase().includes('提供 excel')) {
+                    else if (userMessageText.toLowerCase().includes('提供 csv') || userMessageText.toLowerCase().includes('提供 excel')) {
                         logger.info(`Excel export command detected for thread ${threadTs}`);
                         await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "收到 Excel 匯出指令，正在彙整報告並產生檔案..." });
 
@@ -489,9 +530,12 @@ ${menuContent}
                     }
 
                     // --- Process as regular chat message ---
-                    await dbClient.query('BEGIN');
+                    console.log(`Looking up history for conversationId: ${conversationId}`); // Log conversation ID
                     const historyRes = await dbClient.query('SELECT sender, content FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC', [conversationId]);
                     const geminiHistory = historyRes.rows.map(row => ({ role: row.sender === 'ai' ? 'model' : 'user', parts: [{ text: row.content }] }));
+                    console.log(`Retrieved history length: ${geminiHistory.length}`); // Log history length
+                    // console.log("Gemini History being sent:", JSON.stringify(geminiHistory)); // Optional: Log full history if needed (can be long)
+                    await dbClient.query('BEGIN');
                     await dbClient.query('INSERT INTO messages (conversation_id, sender, content) VALUES ($1, $2, $3)', [conversationId, 'user', userMessageText]);
                     const geminiResponseText = await callGemini(userMessageText, geminiHistory);
                     await dbClient.query('INSERT INTO messages (conversation_id, sender, content) VALUES ($1, $2, $3)', [conversationId, 'ai', geminiResponseText]);
