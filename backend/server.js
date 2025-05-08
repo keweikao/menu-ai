@@ -872,6 +872,14 @@ ${menuContent}
                     // Trigger actual report generation (async)
                     generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger); // Call a new async function
                 
+                } else if (status === 'generating_report') {
+                    logger.info(`Received message while report is generating for conversation ${conversationId}. Informing user to wait.`);
+                    await client.chat.postMessage({
+                        channel: channelId,
+                        thread_ts: threadTs,
+                        text: "目前正在為您產生結案報告中，請稍候片刻。完成後會通知您。"
+                    });
+                
                 } else {
                      logger.warn(`Conversation ${conversationId} has unexpected status: ${status}`);
                      console.log(`Conversation ${conversationId} has unexpected status: ${status}`);
