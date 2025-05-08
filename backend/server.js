@@ -8,6 +8,8 @@ const vision = require('@google-cloud/vision');
 const { App: BoltApp, LogLevel } = require('@slack/bolt');
 const Papa = require('papaparse');
 const ExcelJS = require('exceljs'); // Import exceljs
+const puppeteer = require('puppeteer'); // Added for PDF generation
+const { marked } = require('marked'); // Added for Markdown to HTML
 
 // --- Basic Setup ---
 // dotenv is configured at the top
@@ -185,6 +187,245 @@ async function generateExcelBuffer(structuredText) {
     }
 }
 
+// --- PDF Generation Helper ---
+async function generatePdfReportBuffer(markdownContent, restaurantName) {
+    console.log("Attempting to generate PDF report from Markdown...");
+    if (!markdownContent) {
+        console.error("Markdown content is empty. Cannot generate PDF.");
+        return null;
+    }
+
+    const logoPath = path.join(__dirname, 'assets', 'ichef_logo.png');
+    let logoBase64 = '';
+    try {
+        const logoData = await fs.readFile(logoPath);
+        logoBase64 = Buffer.from(logoData).toString('base64');
+    } catch (err) {
+        console.warn(`Could not load logo at ${logoPath}: ${err.message}. Proceeding without logo.`);
+    }
+
+    const htmlContent = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>結案報告</title>
+            <style>
+                body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; margin: 40px; }
+                h1, h2, h3, h4, h5, h6 { font-weight: bold; margin-top: 1.5em; margin-bottom: 0.5em; }
+                h1 { font-size: 24px; }
+                h2 { font-size: 20px; }
+                h3 { font-size: 18px; }
+                hr { border: 0; border-top: 1px solid #eee; margin: 2em 0; }
+                table { border-collapse: collapse; width: 100%; margin-bottom: 1em; }
+                th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                th { background-color: #f9f9f9; }
+                pre { background-color: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto; }
+                code { font-family: 'Courier New', Courier, monospace; }
+                .header-container { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
+                .report-title { font-size: 28px; font-weight: bold; }
+                .logo { max-width: 150px; max-height: 75px; }
+                /* Ensure content flows after floated logo if using float */
+                .content-body { clear: both; } /* If logo is floated right */
+            </style>
+        </head>
+        <body>
+            ${logoBase64 ? `<div style="text-align: right; margin-bottom: 20px;"><img src="data:image/png;base64,${logoBase64}" alt="Company Logo" class="logo"></div>` : ''}
+            <div class="content-body">
+                ${marked(markdownContent)}
+            </div>
+        </body>
+        </html>
+    `;
+
+    let browser = null;
+    try {
+        console.log("Launching Puppeteer browser...");
+        browser = await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox'] // Common args for server environments
+        });
+        const page = await browser.newPage();
+        console.log("Setting HTML content for PDF generation...");
+        await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+        
+        console.log("Generating PDF buffer...");
+        const pdfBuffer = await page.pdf({
+            format: 'A4',
+            printBackground: true,
+            margin: {
+                top: '40px',
+                right: '40px',
+                bottom: '40px',
+                left: '40px'
+            }
+        });
+        console.log("PDF buffer generated successfully.");
+        return pdfBuffer;
+    } catch (pdfError) {
+        console.error("Error generating PDF report with Puppeteer:", pdfError);
+        return null;
+    } finally {
+        if (browser) {
+            console.log("Closing Puppeteer browser...");
+            await browser.close();
+        }
+    }
+}
+
+// --- Final Report Generation and Sending Logic ---
+async function generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger) {
+    try {
+        logger.info(`Starting final report generation for conversation ${conversationId}`);
+        const convDetailsRes = await dbClient.query(
+            'SELECT menu_id, report_coach_name, report_end_date, report_restaurant_name, target_aov, target_audience FROM conversations WHERE id = $1',
+            [conversationId]
+        );
+
+        if (convDetailsRes.rows.length === 0) {
+            throw new Error("Conversation details not found for report generation.");
+        }
+        const details = convDetailsRes.rows[0];
+        const { menu_id: menuId, report_coach_name: coachName, report_end_date: endDate, report_restaurant_name: restaurantName, target_aov: targetAOV, target_audience: targetAudience } = details;
+
+        if (!menuId || !coachName || !endDate || !restaurantName) {
+            throw new Error("Missing critical information for report generation (menuId, coachName, endDate, or restaurantName).");
+        }
+        
+        // Fetch original menu content (OCR or text)
+        const menuRes = await dbClient.query('SELECT filepath, filename FROM menus WHERE id = $1', [menuId]);
+        if (menuRes.rows.length === 0) throw new Error('Menu file record not found for report.');
+        const menuFilePath = menuRes.rows[0].filepath;
+        const originalMenuFilename = menuRes.rows[0].filename;
+        let menuContentForPrompt = '';
+        try {
+            const fileExt = path.extname(menuFilePath).toLowerCase();
+            if (['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.pdf'].includes(fileExt)) {
+                 menuContentForPrompt = await performOcr(menuFilePath);
+            } else {
+                 const rawMenuContent = await fs.readFile(menuFilePath, 'utf-8');
+                 menuContentForPrompt = sanitizeStringForDB(rawMenuContent);
+            }
+        } catch (readError) { 
+            logger.error(`Report Gen - Error getting menu content:`, readError);
+            // Decide if to proceed without menu content or throw error
+            // For now, proceed with empty menuContentForPrompt if read fails
+        }
+
+        // Construct the Markdown report prompt for Gemini
+        // This is the template provided by the user, with placeholders filled
+        const reportPrompt = `
+你需要向提出「產出結案報告」指令的教練詢問：
+1. 請問您的全名是？ (${coachName})
+2. 本次專案的結案日期（格式：YYYY/MM/DD）是？ (${endDate})
+3. **(僅在無法自動識別餐廳名稱時詢問)** 請問這次結案報告是關於哪間餐廳的？ (${restaurantName})
+
+# 輸出格式與結構要求 (Mandatory Output Format)
+請嚴格依照以下 Markdown 格式與內容要求產出結案報告：
+
+\`\`\`markdown
+${restaurantName} 線上菜單優化專案 結案文件
+
+專案名稱：${restaurantName} 線上菜單優化及目標客單價提升策略規劃
+客戶：${restaurantName}
+服務單位：資廚管理顧問股份有限公司
+教練：${coachName}
+結案日期：${endDate}
+
+---
+
+1. 專案概述與目標回顧
+
+感謝「${restaurantName}」團隊的信任與支持，本次「線上菜單優化專案」現已完成策略規劃階段。本文件旨在彙整雙方共同確認的最終線上菜單優化方案，並為後續的執行與成效追蹤提供清晰指引。
+
+本次專案的核心目標為：透過線上菜單的精細化設計與策略性產品組合，助力「${restaurantName}」有效達成平均客單價 ${targetAOV || '[未提供目標客單價]'} 的營運目標，並針對主要客群 – ${targetAudience || '[未提供目標客群]'} – 全面提升其線上點餐的便捷性、愉悅度及主打品項的吸引力。
+
+---
+
+2. 合作成果：最終線上菜單優化方案要點
+
+基於對「${restaurantName}」的現有菜單分析、市場定位以及明確的營運目標，並融合菜單工程、消費心理學與電商轉換邏輯，我們共同擬定了以下線上菜單優化要點：
+
+[請 AI 根據先前與使用者 (${coachName}) 討論的 ${restaurantName} 菜單優化內容，以及原始菜單 ${originalMenuFilename} (內容如下) 生成此處的優化方案要點。原始菜單內容: ${menuContentForPrompt.substring(0, 1000)}...]
+
+---
+
+3. 預期成效展望
+
+我們期待本次優化方案的落地執行，能為「${restaurantName}」帶來：
+    • 平均客單價穩定達成 ${targetAOV || '[未提供目標客單價]'} 的目標。
+    • 指定主打品項的點選率與銷售額顯著提升。
+    • 線上顧客點餐體驗更佳，滿意度與轉換率提高。
+    • 數位平台上更專業、更具吸引力的品牌形象。
+
+---
+
+4. 執行建議與後續行動
+
+為確保優化方案順利推展並取得預期成效，建議貴團隊：
+    • 落實高品質菜單攝影：根據方案建議，為重點品項拍攝專業美食照片。
+    • 執行內部溝通與培訓：使全體服務同仁了解線上菜單的變革與銷售重點。
+    • 啟動數據監測機制：方案上線後，定期追蹤線上平台的關鍵績效指標 (KPIs)，如平均客單價、各品項銷售佔比、套餐點選率等，作為未來持續優化的依據。
+    • [可根據與客戶的約定，加入其他後續合作或追蹤計畫]
+
+---
+
+5. 結語
+
+再次感謝「${restaurantName}」在此專案中的投入與合作。我們對此線上菜單優化方案充滿信心，並期待它能為貴餐廳帶來實質的業績成長與品牌提升。
+
+資廚管理顧問股份有限公司 敬上
+教練：${coachName}
+結案日期：${endDate}
+\`\`\`
+`;
+        // Fetch conversation history to provide context to Gemini for section 2
+        const historyRes = await dbClient.query('SELECT sender, content FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC', [conversationId]);
+        const geminiHistory = historyRes.rows.map(row => ({ role: row.sender === 'ai' ? 'model' : 'user', parts: [{ text: row.content }] }));
+        
+        logger.info(`Calling Gemini for final report Markdown for conversation ${conversationId}`);
+        const markdownReportContent = await callGemini(sanitizeStringForDB(reportPrompt), geminiHistory);
+        
+        // Extract only the content within ```markdown ... ```
+        const markdownMatch = markdownReportContent.match(/```markdown\s*([\s\S]*?)\s*```/);
+        const finalMarkdown = markdownMatch && markdownMatch[1] ? markdownMatch[1].trim() : markdownReportContent.trim();
+
+        logger.info(`Generating PDF for conversation ${conversationId}`);
+        const pdfBuffer = await generatePdfReportBuffer(finalMarkdown, restaurantName);
+
+        if (pdfBuffer) {
+            logger.info(`Uploading PDF report for conversation ${conversationId}`);
+            await client.files.uploadV2({
+                channel_id: channelId,
+                thread_ts: threadTs,
+                file: pdfBuffer,
+                filename: `${restaurantName}_結案報告.pdf`,
+                initial_comment: `這是為「${restaurantName}」產生的結案報告。`,
+            });
+            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `已成功為「${restaurantName}」產生結案報告並上傳。` });
+        } else {
+            throw new Error("PDF buffer generation failed.");
+        }
+
+    } catch (error) {
+        logger.error(`Error in generateAndSendFinalReport for conv ${conversationId}:`, error);
+        try {
+            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `產生結案報告時發生錯誤：${error.message}` });
+        } catch (slackErr) {
+            logger.error("Failed to send error message to Slack during report generation failure:", slackErr);
+        }
+    } finally {
+        // Revert status to active
+        try {
+            await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['active', conversationId]);
+            logger.info(`Reverted conversation ${conversationId} status to active after report attempt.`);
+        } catch (dbUpdateError) {
+            logger.error(`Failed to revert status for conversation ${conversationId}:`, dbUpdateError);
+        }
+    }
+}
+
+
 // --- Slack Event Handlers ---
 
 // Process uploaded file and create pending conversation
@@ -294,8 +535,17 @@ boltApp.message(async ({ message, client, logger }) => {
                 // --- State 1: Waiting for Background Info ---
                 if (status === 'pending_info') {
                     logger.info(`Processing background info for conversation ${conversationId}`);
-                    const backgroundInfo = userMessageText;
+                    const backgroundInfo = userMessageText; // Raw background info from user
                     if (!menuId) throw new Error('Menu ID missing for pending conversation.');
+
+                    // Attempt to parse target_aov and target_audience from backgroundInfo
+                    // This is a simple parsing attempt; more robust parsing might be needed.
+                    let targetAOV = null;
+                    let targetAudience = null;
+                    const aovMatch = backgroundInfo.match(/目標客單價(?:：|:)\s*([^\n]+)/i);
+                    if (aovMatch && aovMatch[1]) targetAOV = aovMatch[1].trim();
+                    const audienceMatch = backgroundInfo.match(/主要目標客群(?:：|:)\s*([^\n]+)/i);
+                    if (audienceMatch && audienceMatch[1]) targetAudience = audienceMatch[1].trim();
 
                     const menuRes = await dbClient.query('SELECT filepath FROM menus WHERE id = $1', [menuId]);
                     if (menuRes.rows.length === 0) throw new Error('Menu file record not found.');
@@ -408,9 +658,12 @@ ${menuContent}
                     const geminiResponseText = await callGemini(sanitizedPrompt);
 
                     await dbClient.query('BEGIN');
-                    await dbClient.query('INSERT INTO messages (conversation_id, sender, content) VALUES ($1, $2, $3)', [conversationId, 'user', backgroundInfo]);
+                    await dbClient.query('INSERT INTO messages (conversation_id, sender, content) VALUES ($1, $2, $3)', [conversationId, 'user', backgroundInfo]); // Store raw background info
                     await dbClient.query('INSERT INTO messages (conversation_id, sender, content) VALUES ($1, $2, $3)', [conversationId, 'ai', geminiResponseText]);
-                    await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['active', conversationId]);
+                    await dbClient.query(
+                        'UPDATE conversations SET status = $1, target_aov = $2, target_audience = $3 WHERE id = $4',
+                        ['active', targetAOV, targetAudience, conversationId]
+                    );
                     await dbClient.query('COMMIT');
 
                     await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: geminiResponseText });
@@ -528,6 +781,29 @@ ${menuContent}
                         }
                         return;
                     }
+                    // Check for "產出結案報告" (Generate Closing Report) command
+                    else if (userMessageText.toLowerCase().includes('產出結案報告')) {
+                        logger.info(`Closing report command detected for thread ${threadTs}`);
+                        if (!menuId) {
+                            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "錯誤：找不到相關的菜單資訊，無法產生結案報告。" });
+                            return;
+                        }
+                        // Attempt to get restaurant name from menu filename
+                        const menuInfoRes = await dbClient.query('SELECT filename FROM menus WHERE id = $1', [menuId]);
+                        let autoRestaurantName = null;
+                        if (menuInfoRes.rows.length > 0 && menuInfoRes.rows[0].filename) {
+                            // Basic attempt to extract from filename like "RestaurantName_menu.pdf"
+                            const parts = path.parse(menuInfoRes.rows[0].filename).name.split(/[_-\s]/);
+                            if (parts.length > 0) autoRestaurantName = parts[0]; // Takes the first part
+                        }
+
+                        await dbClient.query(
+                            'UPDATE conversations SET status = $1, report_restaurant_name = $2 WHERE id = $3',
+                            ['pending_report_coach_name', autoRestaurantName, conversationId]
+                        );
+                        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "好的，我們來準備結案報告。\n請問您的全名是？" });
+                        return;
+                    }
 
                     // --- Process as regular chat message ---
                     console.log(`Looking up history for conversationId: ${conversationId}`); // Log conversation ID
@@ -548,6 +824,54 @@ ${menuContent}
                     });
                     console.log(`Replied in thread ${threadTs}`);
 
+                } else if (status === 'pending_report_coach_name') {
+                    logger.info(`Received coach name for report: ${userMessageText}`);
+                    await dbClient.query(
+                        'UPDATE conversations SET status = $1, report_coach_name = $2 WHERE id = $3',
+                        ['pending_report_end_date', userMessageText, conversationId]
+                    );
+                    await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "感謝您！\n請問本次專案的結案日期（格式：YYYY/MM/DD）是？" });
+                
+                } else if (status === 'pending_report_end_date') {
+                    logger.info(`Received end date for report: ${userMessageText}`);
+                    // Basic validation for YYYY/MM/DD, can be improved
+                    if (!/^\d{4}\/\d{2}\/\d{2}$/.test(userMessageText)) {
+                        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "日期格式不正確，請使用 YYYY/MM/DD 格式，例如：2024/01/15。" });
+                        return;
+                    }
+                    await dbClient.query(
+                        'UPDATE conversations SET report_end_date = $1 WHERE id = $2',
+                        [userMessageText, conversationId]
+                    );
+
+                    const convDetailsRes = await dbClient.query('SELECT report_restaurant_name FROM conversations WHERE id = $1', [conversationId]);
+                    const currentRestaurantName = convDetailsRes.rows[0]?.report_restaurant_name;
+
+                    if (currentRestaurantName) {
+                        // Restaurant name known, proceed to generation
+                        await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['generating_report', conversationId]);
+                        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `感謝您提供所有資訊！正在為「${currentRestaurantName}」產生結案報告...` });
+                        
+                        // Trigger actual report generation (async)
+                        generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger); // Call a new async function
+
+                    } else {
+                        // Restaurant name not known, ask for it
+                        await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['pending_report_restaurant_name', conversationId]);
+                        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "最後一個問題，請問這次結案報告是關於哪間餐廳的？" });
+                    }
+
+                } else if (status === 'pending_report_restaurant_name') {
+                    logger.info(`Received restaurant name for report: ${userMessageText}`);
+                    await dbClient.query(
+                        'UPDATE conversations SET status = $1, report_restaurant_name = $2 WHERE id = $3',
+                        ['generating_report', userMessageText, conversationId]
+                    );
+                    await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `感謝您！正在為「${userMessageText}」產生結案報告...` });
+
+                    // Trigger actual report generation (async)
+                    generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger); // Call a new async function
+                
                 } else {
                      logger.warn(`Conversation ${conversationId} has unexpected status: ${status}`);
                      console.log(`Conversation ${conversationId} has unexpected status: ${status}`);
@@ -621,6 +945,11 @@ async function initializeDbSchema() {
         slack_channel_id VARCHAR(50),
         slack_thread_ts VARCHAR(50),
         status VARCHAR(50) DEFAULT 'active', -- Added status column
+        report_coach_name TEXT,
+        report_end_date VARCHAR(10),
+        report_restaurant_name TEXT,
+        target_aov VARCHAR(255),
+        target_audience TEXT,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -628,6 +957,11 @@ async function initializeDbSchema() {
     await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS slack_channel_id VARCHAR(50);`);
     await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS slack_thread_ts VARCHAR(50);`);
     await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'active';`); // Add status if not exists
+    await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS report_coach_name TEXT;`);
+    await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS report_end_date VARCHAR(10);`);
+    await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS report_restaurant_name TEXT;`);
+    await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS target_aov VARCHAR(255);`);
+    await client.query(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS target_audience TEXT;`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS messages (
