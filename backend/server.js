@@ -211,7 +211,7 @@ async function generatePdfReportBuffer(markdownContent, restaurantName) {
             <meta charset="UTF-8">
             <title>結案報告</title>
             <style>
-                body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; margin: 40px; }
+                body { font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'SimSun', 'Helvetica Neue', Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; margin: 40px; }
                 h1, h2, h3, h4, h5, h6 { font-weight: bold; margin-top: 1.5em; margin-bottom: 0.5em; }
                 h1 { font-size: 24px; }
                 h2 { font-size: 20px; }
