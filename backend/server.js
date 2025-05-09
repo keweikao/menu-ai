@@ -399,9 +399,12 @@ ${restaurantName} 線上菜單優化專案 結案文件
                 filename: `${restaurantName}_結案報告.docx`, // Changed filename extension
                 initial_comment: `這是為「${restaurantName}」產生的 Word 格式結案報告。`, // Updated comment
             });
-            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `已成功為「${restaurantName}」產生 Word 格式結案報告並上傳。` }); // Updated message
+                filename: `${restaurantName}_結案報告.pdf`,
+                initial_comment: `這是為「${restaurantName}」產生的結案報告。`,
+            });
+            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `已成功為「${restaurantName}」產生結案報告並上傳。` });
         } else {
-            throw new Error("DOCX buffer generation failed."); // Updated error message
+            throw new Error("PDF buffer generation failed.");
         }
 
     } catch (error) {
