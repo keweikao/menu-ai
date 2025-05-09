@@ -847,8 +847,20 @@ ${menuContent}
                         // Trigger actual report generation (async)
                         logger.info(`[DEBUG] About to call generateAndSendFinalReport for conv ${conversationId}`);
                         try {
-                            generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger); // Call a new async function
+                            const reportPromise = generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger); // Call a new async function
                             logger.info(`[DEBUG] Called generateAndSendFinalReport for conv ${conversationId} (no await)`);
+
+                            // Add a .catch to the promise to log any unhandled rejections from it
+                            reportPromise.catch(promiseError => {
+                                logger.error(`[DEBUG] ASYNC ERROR/UNHANDLED REJECTION from generateAndSendFinalReport for conv ${conversationId}:`, promiseError);
+                                // Attempt to inform Slack about this async error
+                                client.chat.postMessage({
+                                    channel: channelId,
+                                    thread_ts: threadTs,
+                                    text: `[DEBUG] 報告產生函式非同步執行時發生嚴重錯誤: ${promiseError.message}`
+                                }).catch(slackErr => logger.error("[DEBUG] Failed to send async error to slack during reportPromise.catch", slackErr));
+                            });
+
                         } catch (syncCallError) {
                             logger.error(`[DEBUG] SYNC ERROR calling generateAndSendFinalReport for conv ${conversationId}:`, syncCallError);
                             await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `[DEBUG] 呼叫報告產生函式時發生同步錯誤: ${syncCallError.message}` });
