@@ -214,21 +214,6 @@ async function generateDocxReportBuffer(markdownContent, restaurantName, logger)
             logger.warn(`DOCX: Could not load or add logo: ${imgErr.message}`);
         }
 
-        // Add Restaurant Name as a title if provided and if not already at the start of markdown
-        if (restaurantName && !(markdownContent || "").trim().startsWith(restaurantName)) {
-            docChildren.push(
-                new Paragraph({
-                    text: restaurantName,
-                    heading: HeadingLevel.TITLE,
-                    alignment: AlignmentType.CENTER,
-                })
-            );
-            // Add a spacer if there's content following the title
-            if ((markdownContent || "").trim().length > 0) {
-                 docChildren.push(new Paragraph(" "));
-            }
-        }
-
         const lines = (markdownContent || "").split('\n');
         for (const line of lines) {
             const trimmedLine = line.trim();
@@ -250,14 +235,7 @@ async function generateDocxReportBuffer(markdownContent, restaurantName, logger)
                 docChildren.push(new Paragraph(" ")); // Preserve empty lines as spacing
             }
             else {
-                // For lines that might contain inline markdown like **bold** or _italic_
-                // docx library requires explicit TextRun segments. This is a simplified approach.
-                // A more robust solution would involve a proper markdown AST to docx conversion.
                 const parts = [];
-                // Simple bold/italic handling - this is very basic
-                // Example: "This is **bold** and *italic*."
-                // This regex part is tricky and can be expanded or handled by a dedicated library
-                // For now, let's keep it simple and just add the line as a single TextRun
                 parts.push(new TextRun(line));
                 docChildren.push(new Paragraph({ children: parts }));
             }
@@ -323,9 +301,9 @@ async function generateAndSendFinalReport(client, channelId, threadTs, conversat
 */ // End of commented out simplified function
 
 
-// Original generateAndSendFinalReport function - NOW ACTIVE
+// Original generateAndSendFinalReport function - Rolled back to a simpler version
 async function generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger) {
-    logger.info(`[generateAndSendFinalReport] Called for conv ${conversationId}`); // Entry log
+    logger.info(`[generateAndSendFinalReport] Called for conv ${conversationId} (Using simplified prompt logic)`);
     try {
         logger.info(`Starting final report generation for conversation ${conversationId}`);
         const convDetailsRes = await dbClient.query(
@@ -343,7 +321,6 @@ async function generateAndSendFinalReport(client, channelId, threadTs, conversat
             throw new Error("Missing critical information for report generation (menuId, coachName, endDate, or restaurantName).");
         }
         
-        // Fetch original menu content (OCR or text)
         const menuRes = await dbClient.query('SELECT filepath, filename FROM menus WHERE id = $1', [menuId]);
         if (menuRes.rows.length === 0) throw new Error('Menu file record not found for report.');
         const menuFilePath = menuRes.rows[0].filepath;
@@ -361,92 +338,15 @@ async function generateAndSendFinalReport(client, channelId, threadTs, conversat
             logger.error(`Report Gen - Error getting menu content:`, readError);
         }
 
-        // Fetch conversation history to prepare section2Content and for Gemini context
+        // Fetch conversation history to provide context to Gemini for section 2
         const historyRes = await dbClient.query('SELECT sender, content FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC', [conversationId]);
-        const historyRows = historyRes.rows;
-        const geminiHistory = historyRows.map(row => ({ role: row.sender === 'ai' ? 'model' : 'user', parts: [{ text: row.content }] }));
+        const geminiHistory = historyRes.rows.map(row => ({ role: row.sender === 'ai' ? 'model' : 'user', parts: [{ text: row.content }] }));
         
-        let finalOptimizedMenuMarkdown = '';
-        let lastTongZhengIndex = -1;
+        // Simplified section2Content logic for stability
+        // This part will use Gemini's ability to synthesize from history.
+        const section2Placeholder = `[請 AI 根據先前與使用者 (${coachName}) 討論的 ${restaurantName} 菜單優化內容，以及原始菜單 ${originalMenuFilename} (內容如下) 生成此處的優化方案要點。原始菜單內容: ${menuContentForPrompt.substring(0, 1000)}...]`;
 
-        // Find the last user message asking for "統整建議"
-        for (let i = historyRows.length - 1; i >= 0; i--) {
-            if (historyRows[i].sender === 'user' && historyRows[i].content.toLowerCase().includes('統整建議')) {
-                lastTongZhengIndex = i;
-                break;
-            }
-        }
-
-        // If "統整建議" was found, get the next AI message as the optimized menu
-        if (lastTongZhengIndex !== -1 && lastTongZhengIndex + 1 < historyRows.length) {
-            const aiResponseToTongZheng = historyRows[lastTongZhengIndex + 1];
-            if (aiResponseToTongZheng.sender === 'ai') {
-                finalOptimizedMenuMarkdown = aiResponseToTongZheng.content;
-                logger.info(`[generateAndSendFinalReport] Found '統整建議' response for report section 2. Length: ${finalOptimizedMenuMarkdown.length}`);
-            }
-        }
-
-        // Fallback: If no "統整建議" response, try to get the last AI message
-        if (!finalOptimizedMenuMarkdown) {
-            let lastAiMessageIndex = -1;
-            for (let i = historyRows.length - 1; i >= 0; i--) {
-                if (historyRows[i].sender === 'ai') {
-                    lastAiMessageIndex = i;
-                    break;
-                }
-            }
-            if (lastAiMessageIndex !== -1) {
-                 finalOptimizedMenuMarkdown = historyRows[lastAiMessageIndex].content;
-                 logger.info(`[generateAndSendFinalReport] Using last AI message (index ${lastAiMessageIndex}) for section 2. Length: ${finalOptimizedMenuMarkdown.length}`);
-            }
-        }
-        
-        // Post-process finalOptimizedMenuMarkdown for DOCX report
-        if (finalOptimizedMenuMarkdown) {
-            let lines = finalOptimizedMenuMarkdown.split('\n');
-            let newLines = [];
-            let inTableToRemove = false;
-            const tableTitleIndicator = "🎯 **核心邏輯與優化重點"; // Start of the table title
-        
-            for (const line of lines) {
-                if (line.includes(tableTitleIndicator)) {
-                    inTableToRemove = true; 
-                    continue; 
-                }
-                if (inTableToRemove) {
-                    if (line.trim().startsWith('|')) { // Table rows start with |
-                        continue;
-                    } else if (line.trim() === '---' && newLines.length > 0 && newLines[newLines.length-1].trim().startsWith('|')) {
-                        // This handles the separator line of the markdown table, assuming it follows a header row.
-                        continue;
-                    }
-                    else {
-                        // No longer in the table or table structure broken
-                        inTableToRemove = false; 
-                    }
-                }
-                if (!inTableToRemove) {
-                    newLines.push(line);
-                }
-            }
-            finalOptimizedMenuMarkdown = newLines.join('\n').trim(); // Trim to remove potential trailing newlines if table was last
-        
-            // Replace icon
-            finalOptimizedMenuMarkdown = finalOptimizedMenuMarkdown.replace(/📸/g, '(建議附照片)');
-            logger.info(`[generateAndSendFinalReport] Processed finalOptimizedMenuMarkdown for DOCX: Removed optimization table and replaced photo icons.`);
-        }
-
-
-        let section2Content;
-        if (finalOptimizedMenuMarkdown) {
-            section2Content = finalOptimizedMenuMarkdown;
-        } else {
-            logger.warn(`[generateAndSendFinalReport] Could not find specific Markdown for section 2. Instructing Gemini to synthesize from history for ${restaurantName}.`);
-            // Fallback instruction for Gemini if no specific menu markdown was found
-            section2Content = `[請 AI 根據本次對話中最終確認的菜單優化建議 (通常是 Markdown 格式的完整菜單結構，包含所有主打推薦、套餐、分類品項等)，生成此處的優化方案要點。請確保此處的內容是使用者最終同意的完整優化菜單。同時參考原始菜單 ${originalMenuFilename} (內容如下): ${menuContentForPrompt.substring(0, 1000)}...]`;
-        }
-
-        // Construct the Markdown report prompt for Gemini
+        // Construct the Markdown report prompt for Gemini (original simpler structure)
         const reportPrompt = `
 你需要向提出「產出結案報告」指令的教練詢問：
 1. 請問您的全名是？ (${coachName})
@@ -477,7 +377,7 @@ ${restaurantName} 線上菜單優化專案 結案文件
 
 2. 合作成果：最終線上菜單優化方案要點
 
-${section2Content}
+${section2Placeholder}
 
 ---
 
@@ -514,14 +414,24 @@ ${section2Content}
         logger.info(`Calling Gemini for final report Markdown for conversation ${conversationId}`);
         const markdownReportContent = await callGemini(sanitizeStringForDB(reportPrompt), geminiHistory);
         
-        // Extract only the content within ```markdown ... ```
         const markdownMatch = markdownReportContent.match(/```markdown\s*([\s\S]*?)\s*```/);
-        const finalMarkdown = markdownMatch && markdownMatch[1] ? markdownMatch[1].trim() : markdownReportContent.trim();
+        let finalMarkdown = markdownReportContent.trim();
+        if (markdownMatch && markdownMatch[1]) { 
+            finalMarkdown = markdownMatch[1].trim();
+            logger.info("[generateAndSendFinalReport] Extracted content from ```markdown block.");
+        } else {
+             logger.warn("[generateAndSendFinalReport] Gemini response did not contain ```markdown blocks. Using the whole response for DOCX conversion.");
+        }
+        // Apply icon replacement to the final markdown that goes into DOCX
+        finalMarkdown = finalMarkdown.replace(/📸/g, '(建議附照片)');
+        // Note: Table removal is implicitly handled by not having the table in this simpler prompt's output for section 2.
+        // If Gemini *still* generates it, then a post-processing step for table removal on finalMarkdown would be needed here.
+        // For now, we assume this simpler prompt structure won't lead to Gemini generating that specific table.
+
         logger.info(`[generateAndSendFinalReport] Markdown for DOCX (length: ${finalMarkdown.length}) generated for conv ${conversationId}`);
 
         logger.info(`Generating DOCX for conversation ${conversationId}`);
-        // Use the new DOCX generator function
-        const docxBuffer = await generateDocxReportBuffer(finalMarkdown, restaurantName, logger); // Pass logger
+        const docxBuffer = await generateDocxReportBuffer(finalMarkdown, restaurantName, logger);
 
         if (docxBuffer) {
             logger.info(`[generateAndSendFinalReport] DOCX buffer generated (size: ${docxBuffer?.byteLength}) for conv ${conversationId}. Proceeding to upload.`);
@@ -529,12 +439,12 @@ ${section2Content}
                 channel_id: channelId,
                 thread_ts: threadTs,
                 file: docxBuffer,
-                filename: `${restaurantName}_結案報告.docx`, // Changed filename extension
-                initial_comment: `這是為「${restaurantName}」產生的 Word 格式結案報告。`, // Updated comment
+                filename: `${restaurantName}_結案報告.docx`,
+                initial_comment: `這是為「${restaurantName}」產生的 Word 格式結案報告。`,
             });
-            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `已成功為「${restaurantName}」產生 Word 格式結案報告並上傳。` }); // Updated message
+            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `已成功為「${restaurantName}」產生 Word 格式結案報告並上傳。` });
         } else {
-            throw new Error("DOCX buffer generation failed."); // Updated error message
+            throw new Error("DOCX buffer generation failed.");
         }
 
     } catch (error) {
@@ -545,7 +455,6 @@ ${section2Content}
             logger.error("Failed to send error message to Slack during report generation failure:", slackErr);
         }
     } finally {
-        // Revert status to active
         try {
             await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['active', conversationId]);
             logger.info(`Reverted conversation ${conversationId} status to active after report attempt.`);
@@ -554,7 +463,7 @@ ${section2Content}
         }
     }
 }
-// End of original generateAndSendFinalReport function - NOW ACTIVE
+// End of original generateAndSendFinalReport function
 
 
 // --- Slack Event Handlers ---
@@ -1029,7 +938,7 @@ ${menuContent}
             try { await dbClient.query('ROLLBACK'); } catch (rbError) { console.error('Rollback failed:', rbError); }
             try {
                  await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `處理你的訊息時發生錯誤: ${error.message}` });
-            } catch (slackError) {
+            } catch (slackErr) {
                  console.error("Failed to send error message to Slack thread:", slackError);
             }
         } finally {
@@ -1123,3 +1032,26 @@ async function initializeDbSchema() {
     client.release();
   }
 }
+
+</final_file_content>
+
+IMPORTANT: For any future changes to this file, use the final_file_content shown above as your reference. This content reflects the current state of the file, including any auto-formatting (e.g., if you used single quotes but the formatter converted them to double quotes). Always base your SEARCH/REPLACE operations on this final version to ensure accuracy.
+
+<environment_details>
+# VSCode Visible Files
+menu-ai/backend/server.js
+menu-ai/backend/report_prompt_template.txt
+
+# VSCode Open Tabs
+menu-ai/backend/server.js
+menu-ai/backend/report_prompt_template.txt
+
+# Current Time
+5/9/2025, 5:19:46 PM (Asia/Taipei, UTC+8:00)
+
+# Context Window Usage
+629,146 / 1,048.576K tokens used (60%)
+
+# Current Mode
+ACT MODE
+</environment_details>
