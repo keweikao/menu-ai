@@ -274,196 +274,55 @@ async function generateDocxReportBuffer(markdownContent, restaurantName, logger)
     }
 }
 
-
-// --- Final Report Generation and Sending Logic (Super Simplified for Debugging) ---
-/* // Start of commented out simplified function
+// --- Final Report Generation and Sending Logic (Ultra-Simplified for Stability) ---
 async function generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger) {
-    logger.info(`[generateAndSendFinalReport] SUPER SIMPLE TEST - Called for conv ${conversationId}`);
+    logger.info(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED VERSION - Called for conv ${conversationId}`);
     try {
+        // This version does not attempt to generate a complex DOCX.
+        // It only sends a simple message to Slack.
+        // The goal is to ensure server.js is syntactically correct and can run.
+        const { report_restaurant_name: restaurantName } = (await dbClient.query('SELECT report_restaurant_name FROM conversations WHERE id = $1', [conversationId])).rows[0] || {};
+
         await client.chat.postMessage({
             channel: channelId,
             thread_ts: threadTs,
-            text: `[DEBUG] generateAndSendFinalReport was called for conv ${conversationId}. Simplified test.`
+            text: `[STABLE_TEST] 結案報告功能 (簡易版) 已為「${restaurantName || '未知餐廳'}」 (ID: ${conversationId}) 觸發。目前此版本僅發送此測試訊息，不產生複雜文件。`
         });
-        logger.info(`[generateAndSendFinalReport] SUPER SIMPLE TEST - Slack message posted for conv ${conversationId}`);
+        logger.info(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED TEST - Slack message posted for conv ${conversationId}`);
+        
+        // Simulate creating a very simple DOCX to ensure docx library itself isn't an issue if it was called
+        const simpleDoc = new Document({
+            sections: [{
+                children: [
+                    new Paragraph({text: `簡易測試報告 for ${restaurantName || 'N/A'}`}),
+                    new Paragraph({text: `對話 ID: ${conversationId}`})
+                ]
+            }]
+        });
+        const buffer = await Packer.toBuffer(simpleDoc);
+        if (buffer) {
+            logger.info(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED TEST - Dummy DOCX buffer created (size: ${buffer.byteLength}). Not uploading.`);
+        } else {
+            logger.warn(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED TEST - Dummy DOCX buffer generation failed.`);
+        }
+
     } catch (error) {
-        logger.error(`[generateAndSendFinalReport] SUPER SIMPLE TEST - Error:`, error);
+        logger.error(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED TEST - Error:`, error);
+        try {
+            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `[STABLE_TEST] 簡易報告功能執行時發生錯誤：${error.message}` });
+        } catch (slackErr) {
+            logger.error("[generateAndSendFinalReport] Failed to send error message to Slack during simplified report failure:", slackErr);
+        }
     } finally {
         // Revert status to active
         try {
             await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['active', conversationId]);
-            logger.info(`[generateAndSendFinalReport] SUPER SIMPLE TEST - Reverted conv ${conversationId} status to active.`);
+            logger.info(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED TEST - Reverted conv ${conversationId} status to active.`);
         } catch (dbUpdateError) {
-            logger.error(`[generateAndSendFinalReport] SUPER SIMPLE TEST - Failed to revert status for conv ${conversationId}:`, dbUpdateError);
+            logger.error(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED TEST - Failed to revert status for conv ${conversationId}:`, dbUpdateError);
         }
     }
 }
-*/ // End of commented out simplified function
-
-
-// Original generateAndSendFinalReport function - Rolled back to a simpler version
-async function generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger) {
-    logger.info(`[generateAndSendFinalReport] Called for conv ${conversationId} (Using simplified prompt logic)`);
-    try {
-        logger.info(`Starting final report generation for conversation ${conversationId}`);
-        const convDetailsRes = await dbClient.query(
-            'SELECT menu_id, report_coach_name, report_end_date, report_restaurant_name, target_aov, target_audience FROM conversations WHERE id = $1',
-            [conversationId]
-        );
-
-        if (convDetailsRes.rows.length === 0) {
-            throw new Error("Conversation details not found for report generation.");
-        }
-        const details = convDetailsRes.rows[0];
-        const { menu_id: menuId, report_coach_name: coachName, report_end_date: endDate, report_restaurant_name: restaurantName, target_aov: targetAOV, target_audience: targetAudience } = details;
-
-        if (!menuId || !coachName || !endDate || !restaurantName) {
-            throw new Error("Missing critical information for report generation (menuId, coachName, endDate, or restaurantName).");
-        }
-        
-        const menuRes = await dbClient.query('SELECT filepath, filename FROM menus WHERE id = $1', [menuId]);
-        if (menuRes.rows.length === 0) throw new Error('Menu file record not found for report.');
-        const menuFilePath = menuRes.rows[0].filepath;
-        const originalMenuFilename = menuRes.rows[0].filename;
-        let menuContentForPrompt = '';
-        try {
-            const fileExt = path.extname(menuFilePath).toLowerCase();
-            if (['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.pdf'].includes(fileExt)) {
-                 menuContentForPrompt = await performOcr(menuFilePath);
-            } else {
-                 const rawMenuContent = await fs.readFile(menuFilePath, 'utf-8');
-                 menuContentForPrompt = sanitizeStringForDB(rawMenuContent);
-            }
-        } catch (readError) { 
-            logger.error(`Report Gen - Error getting menu content:`, readError);
-        }
-
-        // Fetch conversation history to provide context to Gemini for section 2
-        const historyRes = await dbClient.query('SELECT sender, content FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC', [conversationId]);
-        const geminiHistory = historyRes.rows.map(row => ({ role: row.sender === 'ai' ? 'model' : 'user', parts: [{ text: row.content }] }));
-        
-        // Simplified section2Content logic for stability
-        // This part will use Gemini's ability to synthesize from history.
-        const section2Placeholder = `[請 AI 根據先前與使用者 (${coachName}) 討論的 ${restaurantName} 菜單優化內容，以及原始菜單 ${originalMenuFilename} (內容如下) 生成此處的優化方案要點。原始菜單內容: ${menuContentForPrompt.substring(0, 1000)}...]`;
-
-        // Construct the Markdown report prompt for Gemini (original simpler structure)
-        const reportPrompt = `
-你需要向提出「產出結案報告」指令的教練詢問：
-1. 請問您的全名是？ (${coachName})
-2. 本次專案的結案日期（格式：YYYY/MM/DD）是？ (${endDate})
-3. **(僅在無法自動識別餐廳名稱時詢問)** 請問這次結案報告是關於哪間餐廳的？ (${restaurantName})
-
-# 輸出格式與結構要求 (Mandatory Output Format)
-請嚴格依照以下 Markdown 格式與內容要求產出結案報告：
-
-\`\`\`markdown
-${restaurantName} 線上菜單優化專案 結案文件
-
-專案名稱：${restaurantName} 線上菜單優化及目標客單價提升策略規劃
-客戶：${restaurantName}
-服務單位：資廚管理顧問股份有限公司
-教練：${coachName}
-結案日期：${endDate}
-
----
-
-1. 專案概述與目標回顧
-
-感謝「${restaurantName}」團隊的信任與支持，本次「線上菜單優化專案」現已完成策略規劃階段。本文件旨在彙整雙方共同確認的最終線上菜單優化方案，並為後續的執行與成效追蹤提供清晰指引。
-
-本次專案的核心目標為：透過線上菜單的精細化設計與策略性產品組合，助力「${restaurantName}」有效達成平均客單價 ${targetAOV || '[未提供目標客單價]'} 的營運目標，並針對主要客群 – ${targetAudience || '[未提供目標客群]'} – 全面提升其線上點餐的便捷性、愉悅度及主打品項的吸引力。
-
----
-
-2. 合作成果：最終線上菜單優化方案要點
-
-${section2Placeholder}
-
----
-
-3. 預期成效展望
-
-我們期待本次優化方案的落地執行，能為「${restaurantName}」帶來：
-    • 平均客單價穩定達成 ${targetAOV || '[未提供目標客單價]'} 的目標。
-    • 指定主打品項的點選率與銷售額顯著提升。
-    • 線上顧客點餐體驗更佳，滿意度與轉換率提高。
-    • 數位平台上更專業、更具吸引力的品牌形象。
-
----
-
-4. 執行建議與後續行動
-
-為確保優化方案順利推展並取得預期成效，建議貴團隊：
-    • 落實高品質菜單攝影：根據方案建議，為重點品項拍攝專業美食照片。
-    • 執行內部溝通與培訓：使全體服務同仁了解線上菜單的變革與銷售重點。
-    • 啟動數據監測機制：方案上線後，定期追蹤線上平台的關鍵績效指標 (KPIs)，如平均客單價、各品項銷售佔比、套餐點選率等，作為未來持續優化的依據。
-    • [可根據與客戶的約定，加入其他後續合作或追蹤計畫]
-
----
-
-5. 結語
-
-再次感謝「${restaurantName}」在此專案中的投入與合作。我們對此線上菜單優化方案充滿信心，並期待它能為貴餐廳帶來實質的業績成長與品牌提升。
-
-資廚管理顧問股份有限公司 敬上
-教練：${coachName}
-結案日期：${endDate}
-\`\`\`
-`;
-        
-        logger.info(`Calling Gemini for final report Markdown for conversation ${conversationId}`);
-        const markdownReportContent = await callGemini(sanitizeStringForDB(reportPrompt), geminiHistory);
-        
-        const markdownMatch = markdownReportContent.match(/```markdown\s*([\s\S]*?)\s*```/);
-        let finalMarkdown = markdownReportContent.trim();
-        if (markdownMatch && markdownMatch[1]) { 
-            finalMarkdown = markdownMatch[1].trim();
-            logger.info("[generateAndSendFinalReport] Extracted content from ```markdown block.");
-        } else {
-             logger.warn("[generateAndSendFinalReport] Gemini response did not contain ```markdown blocks. Using the whole response for DOCX conversion.");
-        }
-        // Apply icon replacement to the final markdown that goes into DOCX
-        finalMarkdown = finalMarkdown.replace(/📸/g, '(建議附照片)');
-        // Note: Table removal is implicitly handled by not having the table in this simpler prompt's output for section 2.
-        // If Gemini *still* generates it, then a post-processing step for table removal on finalMarkdown would be needed here.
-        // For now, we assume this simpler prompt structure won't lead to Gemini generating that specific table.
-
-        logger.info(`[generateAndSendFinalReport] Markdown for DOCX (length: ${finalMarkdown.length}) generated for conv ${conversationId}`);
-
-        logger.info(`Generating DOCX for conversation ${conversationId}`);
-        const docxBuffer = await generateDocxReportBuffer(finalMarkdown, restaurantName, logger);
-
-        if (docxBuffer) {
-            logger.info(`[generateAndSendFinalReport] DOCX buffer generated (size: ${docxBuffer?.byteLength}) for conv ${conversationId}. Proceeding to upload.`);
-            await client.files.uploadV2({
-                channel_id: channelId,
-                thread_ts: threadTs,
-                file: docxBuffer,
-                filename: `${restaurantName}_結案報告.docx`,
-                initial_comment: `這是為「${restaurantName}」產生的 Word 格式結案報告。`,
-            });
-            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `已成功為「${restaurantName}」產生 Word 格式結案報告並上傳。` });
-        } else {
-            throw new Error("DOCX buffer generation failed.");
-        }
-
-    } catch (error) {
-        logger.error(`Error in generateAndSendFinalReport for conv ${conversationId}:`, error);
-        try {
-            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `產生結案報告時發生錯誤：${error.message}` });
-        } catch (slackErr) {
-            logger.error("Failed to send error message to Slack during report generation failure:", slackErr);
-        }
-    } finally {
-        try {
-            await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['active', conversationId]);
-            logger.info(`Reverted conversation ${conversationId} status to active after report attempt.`);
-        } catch (dbUpdateError) {
-            logger.error(`Failed to revert status for conversation ${conversationId}:`, dbUpdateError);
-        }
-    }
-}
-// End of original generateAndSendFinalReport function
 
 
 // --- Slack Event Handlers ---
@@ -938,7 +797,7 @@ ${menuContent}
             try { await dbClient.query('ROLLBACK'); } catch (rbError) { console.error('Rollback failed:', rbError); }
             try {
                  await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `處理你的訊息時發生錯誤: ${error.message}` });
-            } catch (slackErr) {
+            } catch (slackError) {
                  console.error("Failed to send error message to Slack thread:", slackError);
             }
         } finally {
@@ -1032,26 +891,3 @@ async function initializeDbSchema() {
     client.release();
   }
 }
-
-</final_file_content>
-
-IMPORTANT: For any future changes to this file, use the final_file_content shown above as your reference. This content reflects the current state of the file, including any auto-formatting (e.g., if you used single quotes but the formatter converted them to double quotes). Always base your SEARCH/REPLACE operations on this final version to ensure accuracy.
-
-<environment_details>
-# VSCode Visible Files
-menu-ai/backend/server.js
-menu-ai/backend/report_prompt_template.txt
-
-# VSCode Open Tabs
-menu-ai/backend/server.js
-menu-ai/backend/report_prompt_template.txt
-
-# Current Time
-5/9/2025, 5:19:46 PM (Asia/Taipei, UTC+8:00)
-
-# Context Window Usage
-629,146 / 1,048.576K tokens used (60%)
-
-# Current Mode
-ACT MODE
-</environment_details>
