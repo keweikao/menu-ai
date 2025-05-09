@@ -8,8 +8,10 @@ const vision = require('@google-cloud/vision');
 const { App: BoltApp, LogLevel } = require('@slack/bolt');
 const Papa = require('papaparse');
 const ExcelJS = require('exceljs'); // Import exceljs
-const puppeteer = require('puppeteer'); // Added for PDF generation
-const { marked } = require('marked'); // Added for Markdown to HTML
+// const puppeteer = require('puppeteer'); // Removed for PDF generation
+const { marked } = require('marked'); // Keep for potential Markdown parsing help? Or remove if not used. Let's keep for now.
+const docx = require('docx'); // Added for DOCX generation
+const { Document, Packer, Paragraph, TextRun, ImageRun, HeadingLevel, AlignmentType } = docx;
 
 // --- Basic Setup ---
 // dotenv is configured at the top
@@ -187,91 +189,85 @@ async function generateExcelBuffer(structuredText) {
     }
 }
 
-// --- PDF Generation Helper ---
-async function generatePdfReportBuffer(markdownContent, restaurantName) {
-    console.log("Attempting to generate PDF report from Markdown...");
+// --- DOCX Generation Helper ---
+async function generateDocxReportBuffer(markdownContent, restaurantName) {
+    console.log("Attempting to generate DOCX report from Markdown...");
     if (!markdownContent) {
-        console.error("Markdown content is empty. Cannot generate PDF.");
+        console.error("Markdown content is empty. Cannot generate DOCX.");
         return null;
     }
 
     const logoPath = path.join(__dirname, 'assets', 'ichef_logo.png');
-    let logoBase64 = '';
+    let logoBuffer = null;
     try {
-        const logoData = await fs.readFile(logoPath);
-        logoBase64 = Buffer.from(logoData).toString('base64');
+        logoBuffer = await fs.readFile(logoPath);
+        console.log("Logo file read successfully.");
     } catch (err) {
         console.warn(`Could not load logo at ${logoPath}: ${err.message}. Proceeding without logo.`);
     }
 
-    const htmlContent = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <title>結案報告</title>
-            <style>
-                body { font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'SimSun', 'Helvetica Neue', Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; margin: 40px; }
-                h1, h2, h3, h4, h5, h6 { font-weight: bold; margin-top: 1.5em; margin-bottom: 0.5em; }
-                h1 { font-size: 24px; }
-                h2 { font-size: 20px; }
-                h3 { font-size: 18px; }
-                hr { border: 0; border-top: 1px solid #eee; margin: 2em 0; }
-                table { border-collapse: collapse; width: 100%; margin-bottom: 1em; }
-                th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-                th { background-color: #f9f9f9; }
-                pre { background-color: #f5f5f5; padding: 10px; border-radius: 4px; overflow-x: auto; }
-                code { font-family: 'Courier New', Courier, monospace; }
-                .header-container { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
-                .report-title { font-size: 28px; font-weight: bold; }
-                .logo { max-width: 150px; max-height: 75px; }
-                /* Ensure content flows after floated logo if using float */
-                .content-body { clear: both; } /* If logo is floated right */
-            </style>
-        </head>
-        <body>
-            ${logoBase64 ? `<div style="text-align: right; margin-bottom: 20px;"><img src="data:image/png;base64,${logoBase64}" alt="Company Logo" class="logo"></div>` : ''}
-            <div class="content-body">
-                ${marked(markdownContent)}
-            </div>
-        </body>
-        </html>
-    `;
+    const sections = [];
+    const children = [];
 
-    let browser = null;
-    try {
-        console.log("Launching Puppeteer browser...");
-        browser = await puppeteer.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox'] // Common args for server environments
-        });
-        const page = await browser.newPage();
-        console.log("Setting HTML content for PDF generation...");
-        await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
-        
-        console.log("Generating PDF buffer...");
-        const pdfBuffer = await page.pdf({
-            format: 'A4',
-            printBackground: true,
-            margin: {
-                top: '40px',
-                right: '40px',
-                bottom: '40px',
-                left: '40px'
-            }
-        });
-        console.log("PDF buffer generated successfully.");
-        return pdfBuffer;
-    } catch (pdfError) {
-        console.error("Error generating PDF report with Puppeteer:", pdfError);
-        return null;
-    } finally {
-        if (browser) {
-            console.log("Closing Puppeteer browser...");
-            await browser.close();
+    // Add logo if available
+    if (logoBuffer) {
+        try {
+            children.push(new Paragraph({
+                alignment: AlignmentType.RIGHT, // Align logo to the right
+                children: [
+                    new ImageRun({
+                        data: logoBuffer,
+                        transformation: {
+                            width: 150, // Adjust width as needed
+                            height: 75, // Adjust height as needed
+                        },
+                    }),
+                ],
+            }));
+             children.push(new Paragraph(" ")); // Add some space after logo
+        } catch (imgErr) {
+            console.error("Error processing logo image for docx:", imgErr);
+            // Continue without logo if processing fails
         }
     }
+
+    // Simple Markdown to DOCX conversion (line by line)
+    const lines = markdownContent.split('\n');
+    lines.forEach(line => {
+        const trimmedLine = line.trim();
+        if (trimmedLine.startsWith('### ')) {
+            children.push(new Paragraph({ text: trimmedLine.substring(4), heading: HeadingLevel.HEADING_3 }));
+        } else if (trimmedLine.startsWith('## ')) {
+            children.push(new Paragraph({ text: trimmedLine.substring(3), heading: HeadingLevel.HEADING_2 }));
+        } else if (trimmedLine.startsWith('# ')) {
+            children.push(new Paragraph({ text: trimmedLine.substring(2), heading: HeadingLevel.HEADING_1 }));
+        } else if (trimmedLine === '---') {
+             // Add a horizontal line or just space - docx library might not have direct HR support easily
+             // Let's add extra space for now
+             children.push(new Paragraph(" "));
+             // Could potentially add a paragraph with a border bottom later if needed
+        } else if (trimmedLine) { // Only add non-empty lines as paragraphs
+            // Basic handling for bold/italics could be added here if needed using TextRun properties
+            children.push(new Paragraph({ text: trimmedLine }));
+        } else {
+             children.push(new Paragraph(" ")); // Keep empty lines for spacing
+        }
+    });
+
+    sections.push({ properties: {}, children: children });
+
+    try {
+        const doc = new Document({ sections });
+        console.log("Generating DOCX buffer...");
+        const buffer = await Packer.toBuffer(doc);
+        console.log("DOCX buffer generated successfully.");
+        return buffer;
+    } catch (docxError) {
+        console.error("Error generating DOCX report:", docxError);
+        return null;
+    }
 }
+
 
 // --- Final Report Generation and Sending Logic ---
 async function generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger) {
@@ -390,21 +386,22 @@ ${restaurantName} 線上菜單優化專案 結案文件
         const markdownMatch = markdownReportContent.match(/```markdown\s*([\s\S]*?)\s*```/);
         const finalMarkdown = markdownMatch && markdownMatch[1] ? markdownMatch[1].trim() : markdownReportContent.trim();
 
-        logger.info(`Generating PDF for conversation ${conversationId}`);
-        const pdfBuffer = await generatePdfReportBuffer(finalMarkdown, restaurantName);
+        logger.info(`Generating DOCX for conversation ${conversationId}`);
+        // Use the new DOCX generator function
+        const docxBuffer = await generateDocxReportBuffer(finalMarkdown, restaurantName); 
 
-        if (pdfBuffer) {
-            logger.info(`Uploading PDF report for conversation ${conversationId}`);
+        if (docxBuffer) {
+            logger.info(`Uploading DOCX report for conversation ${conversationId}`);
             await client.files.uploadV2({
                 channel_id: channelId,
                 thread_ts: threadTs,
-                file: pdfBuffer,
-                filename: `${restaurantName}_結案報告.pdf`,
-                initial_comment: `這是為「${restaurantName}」產生的結案報告。`,
+                file: docxBuffer,
+                filename: `${restaurantName}_結案報告.docx`, // Changed filename extension
+                initial_comment: `這是為「${restaurantName}」產生的 Word 格式結案報告。`, // Updated comment
             });
-            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `已成功為「${restaurantName}」產生結案報告並上傳。` });
+            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `已成功為「${restaurantName}」產生 Word 格式結案報告並上傳。` }); // Updated message
         } else {
-            throw new Error("PDF buffer generation failed.");
+            throw new Error("DOCX buffer generation failed."); // Updated error message
         }
 
     } catch (error) {
