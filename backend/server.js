@@ -274,52 +274,178 @@ async function generateDocxReportBuffer(markdownContent, restaurantName, logger)
     }
 }
 
-// --- Final Report Generation and Sending Logic (Ultra-Simplified for Stability) ---
 async function generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger) {
-    logger.info(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED VERSION - Called for conv ${conversationId}`);
+    logger.info(`[generateAndSendFinalReport] Called for conv ${conversationId} (Using external prompt template)`);
     try {
-        // This version does not attempt to generate a complex DOCX.
-        // It only sends a simple message to Slack.
-        // The goal is to ensure server.js is syntactically correct and can run.
-        const { report_restaurant_name: restaurantName } = (await dbClient.query('SELECT report_restaurant_name FROM conversations WHERE id = $1', [conversationId])).rows[0] || {};
+        logger.info(`Starting final report generation for conversation ${conversationId}`);
+        const convDetailsRes = await dbClient.query(
+            'SELECT menu_id, report_coach_name, report_end_date, report_restaurant_name, target_aov, target_audience FROM conversations WHERE id = $1',
+            [conversationId]
+        );
 
-        await client.chat.postMessage({
-            channel: channelId,
-            thread_ts: threadTs,
-            text: `[STABLE_TEST] 結案報告功能 (簡易版) 已為「${restaurantName || '未知餐廳'}」 (ID: ${conversationId}) 觸發。目前此版本僅發送此測試訊息，不產生複雜文件。`
-        });
-        logger.info(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED TEST - Slack message posted for conv ${conversationId}`);
+        if (convDetailsRes.rows.length === 0) {
+            throw new Error("Conversation details not found for report generation.");
+        }
+        const details = convDetailsRes.rows[0];
+        const { menu_id: menuId, report_coach_name: coachName, report_end_date: endDate, report_restaurant_name: restaurantName, target_aov: targetAOV, target_audience: targetAudience } = details;
+
+        if (!menuId || !coachName || !endDate || !restaurantName) {
+            throw new Error("Missing critical information for report generation (menuId, coachName, endDate, or restaurantName).");
+        }
         
-        // Simulate creating a very simple DOCX to ensure docx library itself isn't an issue if it was called
-        const simpleDoc = new Document({
-            sections: [{
-                children: [
-                    new Paragraph({text: `簡易測試報告 for ${restaurantName || 'N/A'}`}),
-                    new Paragraph({text: `對話 ID: ${conversationId}`})
-                ]
-            }]
-        });
-        const buffer = await Packer.toBuffer(simpleDoc);
-        if (buffer) {
-            logger.info(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED TEST - Dummy DOCX buffer created (size: ${buffer.byteLength}). Not uploading.`);
+        const menuRes = await dbClient.query('SELECT filepath, filename FROM menus WHERE id = $1', [menuId]);
+        if (menuRes.rows.length === 0) throw new Error('Menu file record not found for report.');
+        const menuFilePath = menuRes.rows[0].filepath;
+        const originalMenuFilename = menuRes.rows[0].filename;
+        let menuContentForPrompt = '';
+        try {
+            const fileExt = path.extname(menuFilePath).toLowerCase();
+            if (['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.pdf'].includes(fileExt)) {
+                 menuContentForPrompt = await performOcr(menuFilePath);
+            } else {
+                 const rawMenuContent = await fs.readFile(menuFilePath, 'utf-8');
+                 menuContentForPrompt = sanitizeStringForDB(rawMenuContent);
+            }
+        } catch (readError) { 
+            logger.error(`Report Gen - Error getting menu content: ${readError.message}`);
+            // menuContentForPrompt will remain '' which is handled later
+        }
+
+        const historyRes = await dbClient.query('SELECT sender, content FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC', [conversationId]);
+        const historyRows = historyRes.rows;
+        
+        let finalOptimizedMenuMarkdown = '';
+        let lastTongZhengIndex = -1;
+
+        for (let i = historyRows.length - 1; i >= 0; i--) {
+            if (historyRows[i].sender === 'user' && historyRows[i].content.toLowerCase().includes('統整建議')) {
+                lastTongZhengIndex = i;
+                break;
+            }
+        }
+
+        if (lastTongZhengIndex !== -1 && lastTongZhengIndex + 1 < historyRows.length) {
+            const aiResponseToTongZheng = historyRows[lastTongZhengIndex + 1];
+            if (aiResponseToTongZheng.sender === 'ai') {
+                finalOptimizedMenuMarkdown = aiResponseToTongZheng.content;
+                logger.info(`[generateAndSendFinalReport] Found '統整建議' response for report section 2. Length: ${finalOptimizedMenuMarkdown.length}`);
+            }
+        }
+
+        if (!finalOptimizedMenuMarkdown) {
+            let lastAiMessageIndex = -1;
+            for (let i = historyRows.length - 1; i >= 0; i--) {
+                if (historyRows[i].sender === 'ai') {
+                    lastAiMessageIndex = i;
+                    break;
+                }
+            }
+            if (lastAiMessageIndex !== -1) {
+                 finalOptimizedMenuMarkdown = historyRows[lastAiMessageIndex].content;
+                 logger.info(`[generateAndSendFinalReport] Using last AI message (index ${lastAiMessageIndex}) for section 2. Length: ${finalOptimizedMenuMarkdown.length}`);
+            }
+        }
+        
+        if (finalOptimizedMenuMarkdown) {
+            let lines = finalOptimizedMenuMarkdown.split('\n');
+            let newLines = [];
+            let inTableToRemove = false;
+            const tableTitleIndicator = "🎯 **核心邏輯與優化重點";
+        
+            for (const line of lines) {
+                if (line.includes(tableTitleIndicator)) {
+                    inTableToRemove = true; 
+                    continue; 
+                }
+                if (inTableToRemove) {
+                    if (line.trim().startsWith('|')) {
+                        continue;
+                    } else if (line.trim() === '---' && newLines.length > 0 && newLines[newLines.length-1].trim().startsWith('|')) {
+                        continue;
+                    }
+                    else {
+                        inTableToRemove = false; 
+                    }
+                }
+                if (!inTableToRemove) {
+                    newLines.push(line);
+                }
+            }
+            finalOptimizedMenuMarkdown = newLines.join('\n').trim();
+            finalOptimizedMenuMarkdown = finalOptimizedMenuMarkdown.replace(/📸/g, '(建議附照片)');
+            logger.info(`[generateAndSendFinalReport] Processed finalOptimizedMenuMarkdown for DOCX: Removed optimization table and replaced photo icons.`);
+        }
+
+        let section2Content; 
+        if (finalOptimizedMenuMarkdown && finalOptimizedMenuMarkdown.trim() !== '') {
+            section2Content = finalOptimizedMenuMarkdown;
         } else {
-            logger.warn(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED TEST - Dummy DOCX buffer generation failed.`);
+            logger.warn(`[generateAndSendFinalReport] finalOptimizedMenuMarkdown is empty or not found. Using fallback for section2Content for ${restaurantName}.`);
+            section2Content = `[AI請注意：此處應填入根據對話歷史記錄和原始菜單分析得出的最終優化菜單建議。內容應為完整的 Markdown 格式菜單結構，包含所有主打推薦、套餐、分類品項等。請確保這是使用者最終同意的版本。原始菜單檔名：${originalMenuFilename}，部分內容：${(menuContentForPrompt || '').substring(0, 500)}...]`;
+        }
+
+        let reportPromptTemplateString = '';
+        try {
+            reportPromptTemplateString = await fs.readFile(path.join(__dirname, 'report_prompt_template.txt'), 'utf-8');
+        } catch (templateReadError) {
+            logger.error(`[generateAndSendFinalReport] CRITICAL ERROR: Could not read report_prompt_template.txt: ${templateReadError.message}`);
+            throw new Error(`無法讀取報告模板檔案 (${templateReadError.message})，請聯繫管理員。`);
+        }
+
+        let newFinalReportPrompt = reportPromptTemplateString;
+        newFinalReportPrompt = newFinalReportPrompt.replace(/{{restaurantName}}/g, String(restaurantName || '[未提供餐廳名稱]'));
+        newFinalReportPrompt = newFinalReportPrompt.replace(/{{coachName}}/g, String(coachName || '[未提供教練名稱]'));
+        newFinalReportPrompt = newFinalReportPrompt.replace(/{{endDate}}/g, String(endDate || '[未提供結案日期]'));
+        newFinalReportPrompt = newFinalReportPrompt.replace(/{{targetAOV}}/g, String(targetAOV || '[未提供目標客單價]'));
+        newFinalReportPrompt = newFinalReportPrompt.replace(/{{targetAudience}}/g, String(targetAudience || '[未提供目標客群]'));
+        newFinalReportPrompt = newFinalReportPrompt.replace(/{{originalMenuFilename}}/g, String(originalMenuFilename || '[未提供原始檔名]'));
+        const menuContentForPromptSafe = String(menuContentForPrompt || '');
+        newFinalReportPrompt = newFinalReportPrompt.replace(/{{menuContentForPromptShort}}/g, menuContentForPromptSafe.substring(0, 300) || '[無原始菜單摘要]');
+        newFinalReportPrompt = newFinalReportPrompt.replace(/{{section2Content}}/g, String(section2Content || '[最終優化菜單內容未提供]'));
+        
+        logger.info(`Calling Gemini with new report generation prompt for conversation ${conversationId}. Prompt length: ${newFinalReportPrompt.length}`);
+        const markdownReportContent = await callGemini(sanitizeStringForDB(newFinalReportPrompt), []); 
+        
+        const markdownMatch = markdownReportContent.match(/```markdown\s*([\s\S]*?)\s*```/);
+        let finalMarkdown = markdownReportContent.trim(); 
+        if (markdownMatch && markdownMatch[1]) { 
+            finalMarkdown = markdownMatch[1].trim();
+            logger.info("[generateAndSendFinalReport] Extracted content from ```markdown block.");
+        } else {
+             logger.warn("[generateAndSendFinalReport] Gemini response did not contain ```markdown blocks. Using the whole response for DOCX conversion.");
+        }
+        logger.info(`[generateAndSendFinalReport] Markdown for DOCX (length: ${finalMarkdown.length}) generated for conv ${conversationId}`);
+
+        logger.info(`Generating DOCX for conversation ${conversationId}`);
+        const docxBuffer = await generateDocxReportBuffer(finalMarkdown, restaurantName, logger);
+
+        if (docxBuffer) {
+            logger.info(`[generateAndSendFinalReport] DOCX buffer generated (size: ${docxBuffer?.byteLength}) for conv ${conversationId}. Proceeding to upload.`);
+            await client.files.uploadV2({
+                channel_id: channelId,
+                thread_ts: threadTs,
+                file: docxBuffer,
+                filename: `${restaurantName}_結案報告.docx`,
+                initial_comment: `這是為「${restaurantName}」產生的 Word 格式結案報告。`,
+            });
+            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `已成功為「${restaurantName}」產生 Word 格式結案報告並上傳。` });
+        } else {
+            throw new Error("DOCX buffer generation failed.");
         }
 
     } catch (error) {
-        logger.error(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED TEST - Error:`, error);
+        logger.error(`Error in generateAndSendFinalReport for conv ${conversationId}:`, error);
         try {
-            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `[STABLE_TEST] 簡易報告功能執行時發生錯誤：${error.message}` });
+            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `產生結案報告時發生錯誤：${error.message}` });
         } catch (slackErr) {
-            logger.error("[generateAndSendFinalReport] Failed to send error message to Slack during simplified report failure:", slackErr);
+            logger.error("Failed to send error message to Slack during report generation failure:", slackErr);
         }
     } finally {
-        // Revert status to active
         try {
             await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['active', conversationId]);
-            logger.info(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED TEST - Reverted conv ${conversationId} status to active.`);
+            logger.info(`Reverted conversation ${conversationId} status to active after report attempt.`);
         } catch (dbUpdateError) {
-            logger.error(`[generateAndSendFinalReport] ULTRA-SIMPLIFIED TEST - Failed to revert status for conv ${conversationId}:`, dbUpdateError);
+            logger.error(`Failed to revert status for conversation ${conversationId}:`, dbUpdateError);
         }
     }
 }
