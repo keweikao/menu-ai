@@ -386,26 +386,10 @@ async function generateAndSendFinalReport(client, channelId, threadTs, conversat
             }
         }
 
-        // Fallback: If no "統整建議" response, try to get the last AI message before the "產出結案報告" request
+        // Fallback: If no "統整建議" response, try to get the last AI message
         if (!finalOptimizedMenuMarkdown) {
-            let reportRequestUserMessageIndex = -1;
-            // Find the user's message that triggered this report generation.
-            // This is tricky because that message isn't *in* geminiHistory yet if it's the immediate trigger.
-            // We'll search for the last "產出結案報告" in the existing history.
-            for (let i = historyRows.length - 1; i >= 0; i--) {
-                 if (historyRows[i].sender === 'user' && historyRows[i].content.toLowerCase().includes('產出結案報告')) {
-                     reportRequestUserMessageIndex = i; 
-                     break;
-                 }
-            }
-            
             let lastAiMessageIndex = -1;
-            // Start searching for an AI message from before the report request, or from the end if no specific report request found in history.
-            const startIndexForLastAiSearch = (reportRequestUserMessageIndex !== -1 && reportRequestUserMessageIndex > 0) 
-                                             ? reportRequestUserMessageIndex - 1 
-                                             : historyRows.length - 1;
-
-            for (let i = startIndexForLastAiSearch; i >= 0; i--) {
+            for (let i = historyRows.length - 1; i >= 0; i--) {
                 if (historyRows[i].sender === 'ai') {
                     lastAiMessageIndex = i;
                     break;
@@ -416,6 +400,42 @@ async function generateAndSendFinalReport(client, channelId, threadTs, conversat
                  logger.info(`[generateAndSendFinalReport] Using last AI message (index ${lastAiMessageIndex}) for section 2. Length: ${finalOptimizedMenuMarkdown.length}`);
             }
         }
+        
+        // Post-process finalOptimizedMenuMarkdown for DOCX report
+        if (finalOptimizedMenuMarkdown) {
+            let lines = finalOptimizedMenuMarkdown.split('\n');
+            let newLines = [];
+            let inTableToRemove = false;
+            const tableTitleIndicator = "🎯 **核心邏輯與優化重點"; // Start of the table title
+        
+            for (const line of lines) {
+                if (line.includes(tableTitleIndicator)) {
+                    inTableToRemove = true; 
+                    continue; 
+                }
+                if (inTableToRemove) {
+                    if (line.trim().startsWith('|')) { // Table rows start with |
+                        continue;
+                    } else if (line.trim() === '---' && newLines.length > 0 && newLines[newLines.length-1].trim().startsWith('|')) {
+                        // This handles the separator line of the markdown table, assuming it follows a header row.
+                        continue;
+                    }
+                    else {
+                        // No longer in the table or table structure broken
+                        inTableToRemove = false; 
+                    }
+                }
+                if (!inTableToRemove) {
+                    newLines.push(line);
+                }
+            }
+            finalOptimizedMenuMarkdown = newLines.join('\n').trim(); // Trim to remove potential trailing newlines if table was last
+        
+            // Replace icon
+            finalOptimizedMenuMarkdown = finalOptimizedMenuMarkdown.replace(/📸/g, '(建議附照片)');
+            logger.info(`[generateAndSendFinalReport] Processed finalOptimizedMenuMarkdown for DOCX: Removed optimization table and replaced photo icons.`);
+        }
+
 
         let section2Content;
         if (finalOptimizedMenuMarkdown) {
