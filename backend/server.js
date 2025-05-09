@@ -189,55 +189,116 @@ async function generateExcelBuffer(structuredText) {
     }
 }
 
-// --- DOCX Generation Helper (Simplified for Debugging) ---
-async function generateDocxReportBuffer(markdownContent, restaurantName) {
-    logger.info("[generateDocxReportBuffer] Called (Simplified Version)");
+// --- DOCX Generation Helper ---
+async function generateDocxReportBuffer(markdownContent, restaurantName, logger) {
+    logger.info(`[generateDocxReportBuffer] Called to generate DOCX for ${restaurantName}`);
     try {
-        const children = [
-            new Paragraph({ text: "Test DOCX Report", heading: HeadingLevel.HEADING_1 }),
-            new Paragraph("This is a simplified test document."),
-            new Paragraph(`Restaurant: ${restaurantName || 'N/A'}`),
-            new Paragraph(`Markdown content received (first 100 chars): ${(markdownContent || '').substring(0,100)}...`)
-        ];
+        const docChildren = [];
 
-        // Attempt to add logo if available - keep this part to test image handling separately if needed
+        // Attempt to add logo if available
         const logoPath = path.join(__dirname, 'assets', 'ichef_logo.png');
         try {
             const logoBuffer = await fs.readFile(logoPath);
-            logger.info("Logo file read for simplified DOCX.");
-            children.unshift(new Paragraph({ // Add logo at the beginning
+            logger.info("Logo file read for DOCX.");
+            docChildren.push(new Paragraph({
                 alignment: AlignmentType.RIGHT,
                 children: [
                     new ImageRun({
                         data: logoBuffer,
-                        transformation: { width: 100, height: 50 }, // Smaller for test
+                        transformation: { width: 100, height: 50 },
                     }),
                 ],
             }));
-            children.unshift(new Paragraph(" ")); // Space before logo
+            docChildren.push(new Paragraph(" ")); // Space after logo
         } catch (imgErr) {
-            logger.warn(`Simplified DOCX: Could not load or add logo: ${imgErr.message}`);
+            logger.warn(`DOCX: Could not load or add logo: ${imgErr.message}`);
+        }
+
+        // Add Restaurant Name as a title if provided and if not already at the start of markdown
+        if (restaurantName && !(markdownContent || "").trim().startsWith(restaurantName)) {
+            docChildren.push(
+                new Paragraph({
+                    text: restaurantName,
+                    heading: HeadingLevel.TITLE,
+                    alignment: AlignmentType.CENTER,
+                })
+            );
+            // Add a spacer if there's content following the title
+            if ((markdownContent || "").trim().length > 0) {
+                 docChildren.push(new Paragraph(" "));
+            }
+        }
+
+        const lines = (markdownContent || "").split('\n');
+        for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (trimmedLine.startsWith('# ')) {
+                docChildren.push(new Paragraph({ text: trimmedLine.substring(2).trim(), heading: HeadingLevel.HEADING_1 }));
+            } else if (trimmedLine.startsWith('## ')) {
+                docChildren.push(new Paragraph({ text: trimmedLine.substring(3).trim(), heading: HeadingLevel.HEADING_2 }));
+            } else if (trimmedLine.startsWith('### ')) {
+                docChildren.push(new Paragraph({ text: trimmedLine.substring(4).trim(), heading: HeadingLevel.HEADING_3 }));
+            } else if (trimmedLine.startsWith('#### ')) {
+                docChildren.push(new Paragraph({ text: trimmedLine.substring(5).trim(), heading: HeadingLevel.HEADING_4 }));
+            } else if (trimmedLine === '---') {
+                docChildren.push(new Paragraph({ text: '___________________________________', alignment: AlignmentType.CENTER })); // Visual separator
+            } else if (trimmedLine.startsWith('* ')) {
+                docChildren.push(new Paragraph({ text: trimmedLine.substring(2).trim(), bullet: { level: 0 } }));
+            } else if (trimmedLine.match(/^\d+\.\s/)) {
+                 docChildren.push(new Paragraph({ text: trimmedLine.replace(/^\d+\.\s/, '').trim(), numbering: { reference: "default-numbering", level: 0 } }));
+            } else if (trimmedLine === '') {
+                docChildren.push(new Paragraph(" ")); // Preserve empty lines as spacing
+            }
+            else {
+                // For lines that might contain inline markdown like **bold** or _italic_
+                // docx library requires explicit TextRun segments. This is a simplified approach.
+                // A more robust solution would involve a proper markdown AST to docx conversion.
+                const parts = [];
+                // Simple bold/italic handling - this is very basic
+                // Example: "This is **bold** and *italic*."
+                // This regex part is tricky and can be expanded or handled by a dedicated library
+                // For now, let's keep it simple and just add the line as a single TextRun
+                parts.push(new TextRun(line));
+                docChildren.push(new Paragraph({ children: parts }));
+            }
         }
         
         const doc = new Document({
+            numbering: {
+                config: [
+                    {
+                        reference: "default-numbering",
+                        levels: [
+                            {
+                                level: 0,
+                                format: "decimal",
+                                text: "%1.",
+                                alignment: AlignmentType.START,
+                                style: { paragraph: { indent: { left: 720, hanging: 360 } } },
+                            },
+                        ],
+                    },
+                ],
+            },
             sections: [{
                 properties: {},
-                children: children,
+                children: docChildren,
             }],
         });
 
-        logger.info("Simplified DOCX Document object created. Calling Packer.toBuffer...");
+        logger.info("DOCX Document object created. Calling Packer.toBuffer...");
         const buffer = await Packer.toBuffer(doc);
-        logger.info("Simplified DOCX buffer generated successfully.");
+        logger.info("DOCX buffer generated successfully.");
         return buffer;
     } catch (docxError) {
-        logger.error("Error generating simplified DOCX report with Packer.toBuffer:", docxError);
+        logger.error("Error generating DOCX report with Packer.toBuffer:", docxError);
         return null;
     }
 }
 
 
 // --- Final Report Generation and Sending Logic (Super Simplified for Debugging) ---
+/* // Start of commented out simplified function
 async function generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger) {
     logger.info(`[generateAndSendFinalReport] SUPER SIMPLE TEST - Called for conv ${conversationId}`);
     try {
@@ -259,9 +320,10 @@ async function generateAndSendFinalReport(client, channelId, threadTs, conversat
         }
     }
 }
+*/ // End of commented out simplified function
 
 
-/* // Original generateAndSendFinalReport function - temporarily commented out for debugging
+// Original generateAndSendFinalReport function - NOW ACTIVE
 async function generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger) {
     logger.info(`[generateAndSendFinalReport] Called for conv ${conversationId}`); // Entry log
     try {
@@ -382,7 +444,7 @@ ${restaurantName} 線上菜單優化專案 結案文件
 
         logger.info(`Generating DOCX for conversation ${conversationId}`);
         // Use the new DOCX generator function
-        const docxBuffer = await generateDocxReportBuffer(finalMarkdown, restaurantName);
+        const docxBuffer = await generateDocxReportBuffer(finalMarkdown, restaurantName, logger); // Pass logger
 
         if (docxBuffer) {
             logger.info(`[generateAndSendFinalReport] DOCX buffer generated (size: ${docxBuffer?.byteLength}) for conv ${conversationId}. Proceeding to upload.`);
@@ -415,7 +477,7 @@ ${restaurantName} 線上菜單優化專案 結案文件
         }
     }
 }
-*/ // End of original generateAndSendFinalReport function
+// End of original generateAndSendFinalReport function - NOW ACTIVE
 
 
 // --- Slack Event Handlers ---
@@ -863,14 +925,21 @@ ${menuContent}
 
                         } catch (syncCallError) {
                             logger.error(`[DEBUG] SYNC ERROR calling generateAndSendFinalReport for conv ${conversationId}:`, syncCallError);
-                            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `[DEBUG] 呼叫報告產生函式時發生同步錯誤: ${syncCallError.message}` });
+                            await client.chat.postMessage({
+                                channel: channelId,
+                                thread_ts: threadTs,
+                                text: `[DEBUG] 呼叫報告產生函式時發生同步錯誤: ${syncCallError.message}`
+                            });
+                            await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['active', conversationId]);
                         }
                     } else {
-                        // Restaurant name not known, ask for it
-                        await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['pending_report_restaurant_name', conversationId]);
-                        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "最後一個問題，請問這次結案報告是關於哪間餐廳的？" });
+                        // Restaurant name NOT known, ask for it
+                        await dbClient.query(
+                            'UPDATE conversations SET status = $1 WHERE id = $2',
+                            ['pending_report_restaurant_name', conversationId]
+                        );
+                        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "感謝您！\n請問這次結案報告是關於哪間餐廳的？" });
                     }
-
                 } else if (status === 'pending_report_restaurant_name') {
                     logger.info(`Received restaurant name for report: ${userMessageText}`);
                     await dbClient.query(
@@ -880,8 +949,27 @@ ${menuContent}
                     await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `感謝您！正在為「${userMessageText}」產生結案報告...` });
 
                     // Trigger actual report generation (async)
-                    generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger); // Call a new async function
-                
+                    logger.info(`[DEBUG] About to call generateAndSendFinalReport for conv ${conversationId} (after getting restaurant name)`);
+                    try {
+                        const reportPromise = generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger);
+                        logger.info(`[DEBUG] Called generateAndSendFinalReport for conv ${conversationId} (no await, after getting restaurant name)`);
+                        reportPromise.catch(promiseError => {
+                            logger.error(`[DEBUG] ASYNC ERROR/UNHANDLED REJECTION from generateAndSendFinalReport for conv ${conversationId} (after getting restaurant name):`, promiseError);
+                            client.chat.postMessage({
+                                channel: channelId,
+                                thread_ts: threadTs,
+                                text: `[DEBUG] 報告產生函式非同步執行時發生嚴重錯誤: ${promiseError.message}`
+                            }).catch(slackErr => logger.error("[DEBUG] Failed to send async error to slack during reportPromise.catch (after getting restaurant name)", slackErr));
+                        });
+                    } catch (syncCallError) {
+                        logger.error(`[DEBUG] SYNC ERROR calling generateAndSendFinalReport for conv ${conversationId} (after getting restaurant name):`, syncCallError);
+                        await client.chat.postMessage({
+                            channel: channelId,
+                            thread_ts: threadTs,
+                            text: `[DEBUG] 呼叫報告產生函式時發生同步錯誤: ${syncCallError.message}`
+                        });
+                        await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['active', conversationId]);
+                    }
                 } else if (status === 'generating_report') {
                     logger.info(`Received message while report is generating for conversation ${conversationId}. Informing user to wait.`);
                     await client.chat.postMessage({
