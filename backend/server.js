@@ -189,81 +189,49 @@ async function generateExcelBuffer(structuredText) {
     }
 }
 
-// --- DOCX Generation Helper ---
+// --- DOCX Generation Helper (Simplified for Debugging) ---
 async function generateDocxReportBuffer(markdownContent, restaurantName) {
-    console.log("Attempting to generate DOCX report from Markdown...");
-    if (!markdownContent) {
-        console.error("Markdown content is empty. Cannot generate DOCX.");
-        return null;
-    }
-
-    const logoPath = path.join(__dirname, 'assets', 'ichef_logo.png');
-    let logoBuffer = null;
+    logger.info("[generateDocxReportBuffer] Called (Simplified Version)");
     try {
-        logoBuffer = await fs.readFile(logoPath);
-        console.log("Logo file read successfully.");
-    } catch (err) {
-        console.warn(`Could not load logo at ${logoPath}: ${err.message}. Proceeding without logo.`);
-    }
+        const children = [
+            new Paragraph({ text: "Test DOCX Report", heading: HeadingLevel.HEADING_1 }),
+            new Paragraph("This is a simplified test document."),
+            new Paragraph(`Restaurant: ${restaurantName || 'N/A'}`),
+            new Paragraph(`Markdown content received (first 100 chars): ${(markdownContent || '').substring(0,100)}...`)
+        ];
 
-    const sections = [];
-    const children = [];
-
-    // Add logo if available
-    if (logoBuffer) {
+        // Attempt to add logo if available - keep this part to test image handling separately if needed
+        const logoPath = path.join(__dirname, 'assets', 'ichef_logo.png');
         try {
-            children.push(new Paragraph({
-                alignment: AlignmentType.RIGHT, // Align logo to the right
+            const logoBuffer = await fs.readFile(logoPath);
+            logger.info("Logo file read for simplified DOCX.");
+            children.unshift(new Paragraph({ // Add logo at the beginning
+                alignment: AlignmentType.RIGHT,
                 children: [
                     new ImageRun({
                         data: logoBuffer,
-                        transformation: {
-                            width: 150, // Adjust width as needed
-                            height: 75, // Adjust height as needed
-                        },
+                        transformation: { width: 100, height: 50 }, // Smaller for test
                     }),
                 ],
             }));
-             children.push(new Paragraph(" ")); // Add some space after logo
+            children.unshift(new Paragraph(" ")); // Space before logo
         } catch (imgErr) {
-            console.error("Error processing logo image for docx:", imgErr);
-            // Continue without logo if processing fails
+            logger.warn(`Simplified DOCX: Could not load or add logo: ${imgErr.message}`);
         }
-    }
+        
+        const doc = new Document({
+            sections: [{
+                properties: {},
+                children: children,
+            }],
+        });
 
-    // Simple Markdown to DOCX conversion (line by line)
-    const lines = markdownContent.split('\n');
-    lines.forEach(line => {
-        const trimmedLine = line.trim();
-        if (trimmedLine.startsWith('### ')) {
-            children.push(new Paragraph({ text: trimmedLine.substring(4), heading: HeadingLevel.HEADING_3 }));
-        } else if (trimmedLine.startsWith('## ')) {
-            children.push(new Paragraph({ text: trimmedLine.substring(3), heading: HeadingLevel.HEADING_2 }));
-        } else if (trimmedLine.startsWith('# ')) {
-            children.push(new Paragraph({ text: trimmedLine.substring(2), heading: HeadingLevel.HEADING_1 }));
-        } else if (trimmedLine === '---') {
-             // Add a horizontal line or just space - docx library might not have direct HR support easily
-             // Let's add extra space for now
-             children.push(new Paragraph(" "));
-             // Could potentially add a paragraph with a border bottom later if needed
-        } else if (trimmedLine) { // Only add non-empty lines as paragraphs
-            // Basic handling for bold/italics could be added here if needed using TextRun properties
-            children.push(new Paragraph({ text: trimmedLine }));
-        } else {
-             children.push(new Paragraph(" ")); // Keep empty lines for spacing
-        }
-    });
-
-    sections.push({ properties: {}, children: children });
-
-    try {
-        const doc = new Document({ sections });
-        console.log("Generating DOCX buffer...");
+        logger.info("Simplified DOCX Document object created. Calling Packer.toBuffer...");
         const buffer = await Packer.toBuffer(doc);
-        console.log("DOCX buffer generated successfully.");
+        logger.info("Simplified DOCX buffer generated successfully.");
         return buffer;
     } catch (docxError) {
-        console.error("Error generating DOCX report:", docxError);
+        logger.error("Error generating simplified DOCX report with Packer.toBuffer:", docxError);
         return null;
     }
 }
@@ -271,6 +239,7 @@ async function generateDocxReportBuffer(markdownContent, restaurantName) {
 
 // --- Final Report Generation and Sending Logic ---
 async function generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger) {
+    logger.info(`[generateAndSendFinalReport] Called for conv ${conversationId}`); // Entry log
     try {
         logger.info(`Starting final report generation for conversation ${conversationId}`);
         const convDetailsRes = await dbClient.query(
@@ -385,13 +354,14 @@ ${restaurantName} 線上菜單優化專案 結案文件
         // Extract only the content within ```markdown ... ```
         const markdownMatch = markdownReportContent.match(/```markdown\s*([\s\S]*?)\s*```/);
         const finalMarkdown = markdownMatch && markdownMatch[1] ? markdownMatch[1].trim() : markdownReportContent.trim();
+        logger.info(`[generateAndSendFinalReport] Markdown for DOCX (length: ${finalMarkdown.length}) generated for conv ${conversationId}`);
 
         logger.info(`Generating DOCX for conversation ${conversationId}`);
         // Use the new DOCX generator function
-        const docxBuffer = await generateDocxReportBuffer(finalMarkdown, restaurantName); 
+        const docxBuffer = await generateDocxReportBuffer(finalMarkdown, restaurantName);
 
         if (docxBuffer) {
-            logger.info(`Uploading DOCX report for conversation ${conversationId}`);
+            logger.info(`[generateAndSendFinalReport] DOCX buffer generated (size: ${docxBuffer?.byteLength}) for conv ${conversationId}. Proceeding to upload.`);
             await client.files.uploadV2({
                 channel_id: channelId,
                 thread_ts: threadTs,
