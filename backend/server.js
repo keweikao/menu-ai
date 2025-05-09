@@ -237,7 +237,31 @@ async function generateDocxReportBuffer(markdownContent, restaurantName) {
 }
 
 
-// --- Final Report Generation and Sending Logic ---
+// --- Final Report Generation and Sending Logic (Super Simplified for Debugging) ---
+async function generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger) {
+    logger.info(`[generateAndSendFinalReport] SUPER SIMPLE TEST - Called for conv ${conversationId}`);
+    try {
+        await client.chat.postMessage({
+            channel: channelId,
+            thread_ts: threadTs,
+            text: `[DEBUG] generateAndSendFinalReport was called for conv ${conversationId}. Simplified test.`
+        });
+        logger.info(`[generateAndSendFinalReport] SUPER SIMPLE TEST - Slack message posted for conv ${conversationId}`);
+    } catch (error) {
+        logger.error(`[generateAndSendFinalReport] SUPER SIMPLE TEST - Error:`, error);
+    } finally {
+        // Revert status to active
+        try {
+            await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['active', conversationId]);
+            logger.info(`[generateAndSendFinalReport] SUPER SIMPLE TEST - Reverted conv ${conversationId} status to active.`);
+        } catch (dbUpdateError) {
+            logger.error(`[generateAndSendFinalReport] SUPER SIMPLE TEST - Failed to revert status for conv ${conversationId}:`, dbUpdateError);
+        }
+    }
+}
+
+
+/* // Original generateAndSendFinalReport function - temporarily commented out for debugging
 async function generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger) {
     logger.info(`[generateAndSendFinalReport] Called for conv ${conversationId}`); // Entry log
     try {
@@ -391,6 +415,7 @@ ${restaurantName} 線上菜單優化專案 結案文件
         }
     }
 }
+*/ // End of original generateAndSendFinalReport function
 
 
 // --- Slack Event Handlers ---
@@ -820,8 +845,14 @@ ${menuContent}
                         await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `感謝您提供所有資訊！正在為「${currentRestaurantName}」產生結案報告...` });
                         
                         // Trigger actual report generation (async)
-                        generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger); // Call a new async function
-
+                        logger.info(`[DEBUG] About to call generateAndSendFinalReport for conv ${conversationId}`);
+                        try {
+                            generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger); // Call a new async function
+                            logger.info(`[DEBUG] Called generateAndSendFinalReport for conv ${conversationId} (no await)`);
+                        } catch (syncCallError) {
+                            logger.error(`[DEBUG] SYNC ERROR calling generateAndSendFinalReport for conv ${conversationId}:`, syncCallError);
+                            await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `[DEBUG] 呼叫報告產生函式時發生同步錯誤: ${syncCallError.message}` });
+                        }
                     } else {
                         // Restaurant name not known, ask for it
                         await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['pending_report_restaurant_name', conversationId]);
