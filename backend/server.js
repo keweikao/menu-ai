@@ -842,18 +842,10 @@ ${menuContent}
                             await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "錯誤：找不到相關的菜單資訊，無法產生結案報告。" });
                             return;
                         }
-                        // Attempt to get restaurant name from menu filename
-                        const menuInfoRes = await dbClient.query('SELECT filename FROM menus WHERE id = $1', [menuId]);
-                        let autoRestaurantName = null;
-                        if (menuInfoRes.rows.length > 0 && menuInfoRes.rows[0].filename) {
-                            // Basic attempt to extract from filename like "RestaurantName_menu.pdf"
-                            const parts = path.parse(menuInfoRes.rows[0].filename).name.split(/[_-\s]/);
-                            if (parts.length > 0) autoRestaurantName = parts[0]; // Takes the first part
-                        }
-
+                        // Always ask for coach name first, restaurant name will be asked later.
                         await dbClient.query(
-                            'UPDATE conversations SET status = $1, report_restaurant_name = $2 WHERE id = $3',
-                            ['pending_report_coach_name', autoRestaurantName, conversationId]
+                            'UPDATE conversations SET status = $1 WHERE id = $2',
+                            ['pending_report_coach_name', conversationId]
                         );
                         await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "好的，我們來準備結案報告。\n請問您的全名是？" });
                         return;
@@ -897,72 +889,37 @@ ${menuContent}
                         'UPDATE conversations SET report_end_date = $1 WHERE id = $2',
                         [userMessageText, conversationId]
                     );
-
-                    const convDetailsRes = await dbClient.query('SELECT report_restaurant_name FROM conversations WHERE id = $1', [conversationId]);
-                    const currentRestaurantName = convDetailsRes.rows[0]?.report_restaurant_name;
-
-                    if (currentRestaurantName) {
-                        // Restaurant name known, proceed to generation
-                        await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['generating_report', conversationId]);
-                        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `感謝您提供所有資訊！正在為「${currentRestaurantName}」產生結案報告...` });
-                        
-                        // Trigger actual report generation (async)
-                        logger.info(`[DEBUG] About to call generateAndSendFinalReport for conv ${conversationId}`);
-                        try {
-                            const reportPromise = generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger); // Call a new async function
-                            logger.info(`[DEBUG] Called generateAndSendFinalReport for conv ${conversationId} (no await)`);
-
-                            // Add a .catch to the promise to log any unhandled rejections from it
-                            reportPromise.catch(promiseError => {
-                                logger.error(`[DEBUG] ASYNC ERROR/UNHANDLED REJECTION from generateAndSendFinalReport for conv ${conversationId}:`, promiseError);
-                                // Attempt to inform Slack about this async error
-                                client.chat.postMessage({
-                                    channel: channelId,
-                                    thread_ts: threadTs,
-                                    text: `[DEBUG] 報告產生函式非同步執行時發生嚴重錯誤: ${promiseError.message}`
-                                }).catch(slackErr => logger.error("[DEBUG] Failed to send async error to slack during reportPromise.catch", slackErr));
-                            });
-
-                        } catch (syncCallError) {
-                            logger.error(`[DEBUG] SYNC ERROR calling generateAndSendFinalReport for conv ${conversationId}:`, syncCallError);
-                            await client.chat.postMessage({
-                                channel: channelId,
-                                thread_ts: threadTs,
-                                text: `[DEBUG] 呼叫報告產生函式時發生同步錯誤: ${syncCallError.message}`
-                            });
-                            await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['active', conversationId]);
-                        }
-                    } else {
-                        // Restaurant name NOT known, ask for it
-                        await dbClient.query(
-                            'UPDATE conversations SET status = $1 WHERE id = $2',
-                            ['pending_report_restaurant_name', conversationId]
-                        );
-                        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "感謝您！\n請問這次結案報告是關於哪間餐廳的？" });
-                    }
+                    // After getting end date, always ask for restaurant name
+                    await dbClient.query(
+                        'UPDATE conversations SET status = $1 WHERE id = $2',
+                        ['pending_report_restaurant_name', conversationId]
+                    );
+                    await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: "感謝您！\n請問這次結案報告是關於哪間餐廳的？" });
+                    return; // Return after asking
+                
                 } else if (status === 'pending_report_restaurant_name') {
                     logger.info(`Received restaurant name for report: ${userMessageText}`);
                     await dbClient.query(
                         'UPDATE conversations SET status = $1, report_restaurant_name = $2 WHERE id = $3',
                         ['generating_report', userMessageText, conversationId]
                     );
-                    await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `感謝您！正在為「${userMessageText}」產生結案報告...` });
+                    await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: `感謝您提供所有資訊！正在為「${userMessageText}」產生結案報告...` });
 
                     // Trigger actual report generation (async)
-                    logger.info(`[DEBUG] About to call generateAndSendFinalReport for conv ${conversationId} (after getting restaurant name)`);
+                    logger.info(`[DEBUG] About to call generateAndSendFinalReport for conv ${conversationId} (after getting all report info)`);
                     try {
                         const reportPromise = generateAndSendFinalReport(client, channelId, threadTs, conversationId, dbClient, logger);
-                        logger.info(`[DEBUG] Called generateAndSendFinalReport for conv ${conversationId} (no await, after getting restaurant name)`);
+                        logger.info(`[DEBUG] Called generateAndSendFinalReport for conv ${conversationId} (no await, after getting all report info)`);
                         reportPromise.catch(promiseError => {
-                            logger.error(`[DEBUG] ASYNC ERROR/UNHANDLED REJECTION from generateAndSendFinalReport for conv ${conversationId} (after getting restaurant name):`, promiseError);
+                            logger.error(`[DEBUG] ASYNC ERROR/UNHANDLED REJECTION from generateAndSendFinalReport for conv ${conversationId} (after getting all report info):`, promiseError);
                             client.chat.postMessage({
                                 channel: channelId,
                                 thread_ts: threadTs,
                                 text: `[DEBUG] 報告產生函式非同步執行時發生嚴重錯誤: ${promiseError.message}`
-                            }).catch(slackErr => logger.error("[DEBUG] Failed to send async error to slack during reportPromise.catch (after getting restaurant name)", slackErr));
+                            }).catch(slackErr => logger.error("[DEBUG] Failed to send async error to slack during reportPromise.catch (after getting all report info)", slackErr));
                         });
                     } catch (syncCallError) {
-                        logger.error(`[DEBUG] SYNC ERROR calling generateAndSendFinalReport for conv ${conversationId} (after getting restaurant name):`, syncCallError);
+                        logger.error(`[DEBUG] SYNC ERROR calling generateAndSendFinalReport for conv ${conversationId} (after getting all report info):`, syncCallError);
                         await client.chat.postMessage({
                             channel: channelId,
                             thread_ts: threadTs,
@@ -970,6 +927,8 @@ ${menuContent}
                         });
                         await dbClient.query('UPDATE conversations SET status = $1 WHERE id = $2', ['active', conversationId]);
                     }
+                    return; // Return after triggering report generation
+
                 } else if (status === 'generating_report') {
                     logger.info(`Received message while report is generating for conversation ${conversationId}. Informing user to wait.`);
                     await client.chat.postMessage({
