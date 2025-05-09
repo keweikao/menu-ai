@@ -359,12 +359,74 @@ async function generateAndSendFinalReport(client, channelId, threadTs, conversat
             }
         } catch (readError) { 
             logger.error(`Report Gen - Error getting menu content:`, readError);
-            // Decide if to proceed without menu content or throw error
-            // For now, proceed with empty menuContentForPrompt if read fails
+        }
+
+        // Fetch conversation history to prepare section2Content and for Gemini context
+        const historyRes = await dbClient.query('SELECT sender, content FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC', [conversationId]);
+        const historyRows = historyRes.rows;
+        const geminiHistory = historyRows.map(row => ({ role: row.sender === 'ai' ? 'model' : 'user', parts: [{ text: row.content }] }));
+        
+        let finalOptimizedMenuMarkdown = '';
+        let lastTongZhengIndex = -1;
+
+        // Find the last user message asking for "統整建議"
+        for (let i = historyRows.length - 1; i >= 0; i--) {
+            if (historyRows[i].sender === 'user' && historyRows[i].content.toLowerCase().includes('統整建議')) {
+                lastTongZhengIndex = i;
+                break;
+            }
+        }
+
+        // If "統整建議" was found, get the next AI message as the optimized menu
+        if (lastTongZhengIndex !== -1 && lastTongZhengIndex + 1 < historyRows.length) {
+            const aiResponseToTongZheng = historyRows[lastTongZhengIndex + 1];
+            if (aiResponseToTongZheng.sender === 'ai') {
+                finalOptimizedMenuMarkdown = aiResponseToTongZheng.content;
+                logger.info(`[generateAndSendFinalReport] Found '統整建議' response for report section 2. Length: ${finalOptimizedMenuMarkdown.length}`);
+            }
+        }
+
+        // Fallback: If no "統整建議" response, try to get the last AI message before the "產出結案報告" request
+        if (!finalOptimizedMenuMarkdown) {
+            let reportRequestUserMessageIndex = -1;
+            // Find the user's message that triggered this report generation.
+            // This is tricky because that message isn't *in* geminiHistory yet if it's the immediate trigger.
+            // We'll search for the last "產出結案報告" in the existing history.
+            for (let i = historyRows.length - 1; i >= 0; i--) {
+                 if (historyRows[i].sender === 'user' && historyRows[i].content.toLowerCase().includes('產出結案報告')) {
+                     reportRequestUserMessageIndex = i; 
+                     break;
+                 }
+            }
+            
+            let lastAiMessageIndex = -1;
+            // Start searching for an AI message from before the report request, or from the end if no specific report request found in history.
+            const startIndexForLastAiSearch = (reportRequestUserMessageIndex !== -1 && reportRequestUserMessageIndex > 0) 
+                                             ? reportRequestUserMessageIndex - 1 
+                                             : historyRows.length - 1;
+
+            for (let i = startIndexForLastAiSearch; i >= 0; i--) {
+                if (historyRows[i].sender === 'ai') {
+                    lastAiMessageIndex = i;
+                    break;
+                }
+            }
+            if (lastAiMessageIndex !== -1) {
+                 finalOptimizedMenuMarkdown = historyRows[lastAiMessageIndex].content;
+                 logger.info(`[generateAndSendFinalReport] Using last AI message (index ${lastAiMessageIndex}) for section 2. Length: ${finalOptimizedMenuMarkdown.length}`);
+            }
+        }
+
+        let section2Content;
+        if (finalOptimizedMenuMarkdown) {
+            section2Content = finalOptimizedMenuMarkdown;
+        } else {
+            logger.warn(`[generateAndSendFinalReport] Could not find specific Markdown for section 2. Instructing Gemini to synthesize from history for ${restaurantName}.`);
+            // Fallback instruction for Gemini if no specific menu markdown was found
+            section2Content = `[請 AI 根據本次對話中最終確認的菜單優化建議 (通常是 Markdown 格式的完整菜單結構，包含所有主打推薦、套餐、分類品項等)，生成此處的優化方案要點。請確保此處的內容是使用者最終同意的完整優化菜單。同時參考原始菜單 ${originalMenuFilename} (內容如下): ${menuContentForPrompt.substring(0, 1000)}...]`;
         }
 
         // Construct the Markdown report prompt for Gemini
-        // This is the template provided by the user, with placeholders filled
         const reportPrompt = `
 你需要向提出「產出結案報告」指令的教練詢問：
 1. 請問您的全名是？ (${coachName})
@@ -395,9 +457,7 @@ ${restaurantName} 線上菜單優化專案 結案文件
 
 2. 合作成果：最終線上菜單優化方案要點
 
-基於對「${restaurantName}」的現有菜單分析、市場定位以及明確的營運目標，並融合菜單工程、消費心理學與電商轉換邏輯，我們共同擬定了以下線上菜單優化要點：
-
-[請 AI 根據先前與使用者 (${coachName}) 討論的 ${restaurantName} 菜單優化內容，以及原始菜單 ${originalMenuFilename} (內容如下) 生成此處的優化方案要點。原始菜單內容: ${menuContentForPrompt.substring(0, 1000)}...]
+${section2Content}
 
 ---
 
@@ -430,9 +490,6 @@ ${restaurantName} 線上菜單優化專案 結案文件
 結案日期：${endDate}
 \`\`\`
 `;
-        // Fetch conversation history to provide context to Gemini for section 2
-        const historyRes = await dbClient.query('SELECT sender, content FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC', [conversationId]);
-        const geminiHistory = historyRes.rows.map(row => ({ role: row.sender === 'ai' ? 'model' : 'user', parts: [{ text: row.content }] }));
         
         logger.info(`Calling Gemini for final report Markdown for conversation ${conversationId}`);
         const markdownReportContent = await callGemini(sanitizeStringForDB(reportPrompt), geminiHistory);
