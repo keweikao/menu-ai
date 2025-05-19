@@ -71,7 +71,7 @@ function removeEmojis(text) {
 
 
 // --- Gemini API Helper ---
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-exp-03-25:generateContent?key=${process.env.GEMINI_API_KEY}`; // Updated model name
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-thinking-exp-01-21:generateContent?key=${process.env.GEMINI_API_KEY}`; // Updated model name
 
 async function callGemini(prompt, history = []) {
   const validHistory = Array.isArray(history) ? history : [];
